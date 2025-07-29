@@ -1,0 +1,437 @@
+# AutoML Pipeline Configuration
+# This configuration supports Classification, Regression, and Clustering tasks
+# with shared global settings and task-specific configurations
+
+# Environment-specific configurations
+environments:
+  development:
+    # Development environment - optimized for speed and debugging
+    performance:
+      parallel_jobs: 2              # Limited parallelism for debugging
+      memory_limit_gb: 4            # Lower memory usage
+      timeout_minutes: 30           # Shorter timeout for quick iteration
+    
+    classification:
+      models:
+        run_logistic: true
+        run_random_forest: true
+        run_gradient_boosting: false    # Disable slow models in dev
+        run_neural_network: false      # Disable slow models in dev
+        run_decision_tree: true
+        run_xgboost: false             # Disable in dev for speed
+        run_lightgbm: false            # Disable in dev for speed
+      
+      hyperparameter_tuning:
+        enable_hyperparameter_tuning: false  # Disable for fast iteration
+        optimization_method: "random_search"  # If enabled, use faster method
+        random_search_trials: 5        # Very few trials
+        optuna_trials: 10              # Very few trials
+      
+      cross_validation:
+        cv_folds: 3                    # Fewer folds for speed
+      
+      data_balancing:
+        balance_method: "oversample"   # Faster than SMOTE
+    
+    logging:
+      level: "DEBUG"                   # More verbose logging
+      detailed_metrics: true
+      progress_tracking: true
+
+  staging:
+    # Staging environment - balanced between speed and accuracy
+    performance:
+      parallel_jobs: 4
+      memory_limit_gb: 8
+      timeout_minutes: 60
+    
+    classification:
+      models:
+        run_logistic: true
+        run_random_forest: true
+        run_gradient_boosting: true
+        run_neural_network: false      # Still skip heavy models
+        run_decision_tree: true
+        run_xgboost: "auto"            # Auto-detect availability
+        run_lightgbm: "auto"           # Auto-detect availability
+      
+      hyperparameter_tuning:
+        enable_hyperparameter_tuning: true
+        optimization_method: "random_search"  # Balanced approach
+        random_search_trials: 15
+        optuna_trials: 25
+      
+      cross_validation:
+        cv_folds: 5                    # Standard CV
+      
+      data_balancing:
+        balance_method: "smote"        # More sophisticated balancing
+    
+    logging:
+      level: "INFO"
+      detailed_metrics: true
+      progress_tracking: true
+
+  production:
+    # Production environment - optimized for best accuracy
+    performance:
+      parallel_jobs: -1               # Use all available cores
+      memory_limit_gb: 16
+      timeout_minutes: 120            # Allow longer training
+    
+    classification:
+      models:
+        run_logistic: true
+        run_random_forest: true
+        run_gradient_boosting: true
+        run_neural_network: true       # Enable all models
+        run_decision_tree: true
+        run_xgboost: "auto"
+        run_lightgbm: "auto"
+      
+      hyperparameter_tuning:
+        enable_hyperparameter_tuning: true
+        optimization_method: "optuna"  # Most sophisticated method
+        random_search_trials: 30
+        optuna_trials: 100             # Extensive search
+        optuna_timeout: 600            # 10 minutes
+      
+      cross_validation:
+        cv_folds: 5
+      
+      data_balancing:
+        balance_method: "smote"
+    
+    logging:
+      level: "WARNING"                 # Less verbose in production
+      detailed_metrics: false          # Reduce log volume
+      progress_tracking: false
+
+# Default environment (fallback if no environment specified)
+default_environment: "production"
+
+# Global settings that apply to all environments (can be overridden by environment-specific settings)
+global:
+  # Spark configuration
+  spark:
+    app_name: "AutoML Pipeline"
+    master: "local[*]"
+    log_level: "WARN"
+  
+  # Data processing settings
+  data_processing:
+    missing_value_threshold: 0.7  # Drop columns with >70% missing values
+    categorical_threshold: 10     # Treat columns with <10 unique values as categorical
+    max_categorical_cardinality: 50  # Convert categorical features with >50 unique values to numeric (prevents maxBins issues)
+    sample_fraction: 1.0          # Fraction of data to use (1.0 = all data)
+    random_seed: 42               # Random seed for reproducibility
+    
+    # Variable inclusion/exclusion settings
+    include_vars: []              # Specific variable names to include (empty = include all)
+    exclude_vars: []              # Specific variable names to exclude (empty = exclude none)
+    include_prefix: []            # Include variables starting with these prefixes
+    exclude_prefix: []            # Exclude variables starting with these prefixes  
+    include_suffix: []            # Include variables ending with these suffixes
+    exclude_suffix: []            # Exclude variables ending with these suffixes
+  
+  # Feature selection settings
+  feature_selection:
+    max_features: 50              # Maximum number of features to select
+    sequential_threshold: 200     # Use sequential selection if features > this number
+    chunk_size: 100               # Chunk size for feature selection
+    features_per_chunk: 30        # Features to select from each chunk
+  
+  # Data validation settings
+  validation:
+    min_sample_size_for_split: 5000  # Minimum size to use train/valid/test split instead of CV
+    test_size: 0.2                   # Test set proportion
+    validation_size: 0.2             # Validation set proportion
+  
+  # Output settings
+  output:
+    base_directory: "automl_output"
+    save_models: true
+    save_predictions: true
+    save_metrics: true
+
+# Default classification configuration (used when no environment override exists)
+classification:
+  # Model selection
+  models:
+    # Core models (always available)
+    run_logistic: true
+    run_random_forest: true
+    run_gradient_boosting: true
+    run_neural_network: true
+    run_decision_tree: true
+    # Advanced models (auto-detected based on package availability)
+    run_xgboost: "auto"     # Will be set based on package availability
+    run_lightgbm: "auto"    # Will be set based on package availability
+  
+  # Model evaluation
+  evaluation:
+    model_selection_criteria: "ks"     # 'ks', 'roc', 'accuracy' for binary; 'accuracy' for multiclass
+    dataset_to_use: "valid"            # 'train', 'valid', 'test', 'oot1', 'oot2'
+  
+  # Cross-validation settings
+  cross_validation:
+    use_cross_validation: "auto"       # 'auto', 'always', 'never'
+    cv_folds: 5                        # Number of cross-validation folds
+    cv_metric_binary: "areaUnderROC"   # CV metric for binary classification
+    cv_metric_multiclass: "accuracy"   # CV metric for multiclass classification
+  
+  # Imbalanced data handling
+  data_balancing:
+    auto_balance: true                 # Enable automatic balancing for imbalanced classes
+    imbalance_threshold: 0.05          # Threshold below which to consider class imbalanced (5%)
+    balance_method: "oversample"       # 'oversample', 'smote', or 'disabled'
+    max_balance_ratio: 0.05            # Maximum ratio to balance minority class to (5% of majority)
+    smote_k_neighbors: 5               # Number of nearest neighbors for SMOTE algorithm
+  
+  # Hyperparameter optimization
+  hyperparameter_tuning:
+    enable_hyperparameter_tuning: false   # Enable hyperparameter optimization
+    optimization_method: "optuna"         # 'optuna', 'random_search', 'grid_search'
+    
+    # Optuna settings
+    optuna_trials: 50                      # Number of Optuna trials
+    optuna_timeout: 300                    # Timeout in seconds (5 minutes)
+    
+    # Random search settings
+    random_search_trials: 20               # Number of random search trials
+    random_search_timeout: 300             # Timeout in seconds
+    
+    # Grid search settings
+    grid_search_max_combinations: 100      # Maximum parameter combinations
+    grid_search_timeout: 600               # Timeout in seconds (10 minutes)
+  
+  # Model selection strategy
+  model_selection:
+    improvement_threshold: 0.01            # Minimum improvement (1%) to consider tuned model
+    overfitting_threshold: 0.05            # Maximum acceptable overfitting gap (5%)
+    statistical_significance_threshold: 0.05  # Threshold for statistical significance (5%)
+
+# Regression-specific configuration (for future implementation)
+regression:
+  # Model selection
+  models:
+    run_linear_regression: true
+    run_random_forest: true
+    run_gradient_boosting: true
+    run_neural_network: true
+    run_decision_tree: true
+    run_xgboost: "auto"
+    run_lightgbm: "auto"
+  
+  # Model evaluation
+  evaluation:
+    model_selection_criteria: "rmse"      # 'rmse', 'mae', 'r2'
+    dataset_to_use: "valid"
+  
+  # Cross-validation settings
+  cross_validation:
+    use_cross_validation: "auto"
+    cv_folds: 5
+    cv_metric: "rmse"                     # CV metric for regression
+  
+  # Hyperparameter optimization
+  hyperparameter_tuning:
+    enable_hyperparameter_tuning: true
+    optimization_method: "optuna"
+    optuna_trials: 50
+    optuna_timeout: 300
+    random_search_trials: 20
+    random_search_timeout: 300
+    grid_search_max_combinations: 100
+    grid_search_timeout: 600
+  
+  # Model selection strategy
+  model_selection:
+    improvement_threshold: 0.01
+    overfitting_threshold: 0.05
+    statistical_significance_threshold: 0.05
+
+# Clustering-specific configuration
+clustering:
+  # Model selection (only implemented models enabled)
+  models:
+    run_kmeans: true
+    run_bisecting_kmeans: true
+    run_dbscan: false          # Not implemented yet
+    run_gaussian_mixture: false  # Not implemented yet
+    run_hierarchical: false    # Not implemented yet
+  
+  # Clustering evaluation
+  evaluation:
+    model_selection_criteria: "silhouette"  # 'silhouette', 'calinski_harabasz', 'davies_bouldin'
+    optimal_k_method: "elbow"               # 'elbow', 'silhouette', 'gap_statistic'
+    k_range: [2, 15]                       # Extended range for better exploration
+  
+  # Algorithm-specific settings
+  kmeans:
+    max_iter: 100
+    tol: 0.0001
+    init_mode: "k-means||"     # Better default than k-means++
+    init_steps: 5              # Added for better initialization
+  
+  bisecting_kmeans:
+    max_iter: 100
+    min_divisible_cluster_size: 1.0
+  
+  dbscan:
+    eps: 0.5
+    min_samples: 5
+  
+  # Hyperparameter optimization
+  hyperparameter_tuning:
+    enable_hyperparameter_tuning: true     # Enable by default for better results
+    optimization_method: "optuna"
+    optuna_trials: 50                      # Increased for better exploration
+    optuna_timeout: 600                    # 10 minutes for thorough search
+    
+    # Parameter ranges for tuning
+    parameter_ranges:
+      kmeans:
+        k_range: [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]  # Extended k range
+        max_iter_range: [20, 50, 100, 200]              # More iteration options
+        tol_range: [0.000001, 0.00001, 0.0001, 0.001, 0.01]      # Finer tolerance (as floats)
+        init_modes: ["k-means||", "random"]             # Both initialization methods
+        
+      bisecting_kmeans:
+        k_range: [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]
+        max_iter_range: [20, 50, 100, 200] 
+        min_divisible_range: [0.5, 1.0, 2.0, 3.0, 5.0] # Extended range
+
+# Logging and monitoring (default - can be overridden by environment)
+logging:
+  level: "INFO"                           # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true
+  log_file: "automl_pipeline.log"
+  detailed_metrics: true
+  progress_tracking: true
+
+# Performance and resource management (default - can be overridden by environment)
+performance:
+  parallel_jobs: -1                       # Number of parallel jobs (-1 = use all cores)
+  memory_limit_gb: 8                      # Memory limit in GB
+  timeout_minutes: 60                     # Overall pipeline timeout
+  early_stopping: true                    # Enable early stopping for long-running tasks
+
+# Flexible Data Input Configuration
+flexible_data_input:
+  # Enable/disable flexible data input system
+  enabled: true
+  
+  # Default source type for auto-detection
+  default_source_type: "auto"              # auto, existing, upload, bigquery
+  
+  # BigQuery Configuration
+  bigquery:
+    # Default BigQuery connector options
+    default_options:
+      useAvroLogicalTypes: true
+      viewsEnabled: true
+      
+    # Authentication settings
+    authentication:
+      method: "service_account"            # auto, service_account, gcloud
+      service_account_path: "/path/to/your/service-account-key.json"  # Path to service account JSON file
+      
+    # Performance settings
+    performance:
+      materializationDataset: ""           # Temporary dataset for materialization
+      materializationProject: ""           # Project for temporary tables
+      maxReadParallelism: 10000           # Maximum read parallelism
+      
+  # File Upload Configuration  
+  file_upload:
+    # Supported file formats
+    supported_formats:
+      csv: [".csv"]
+      tsv: [".tsv", ".tab"]
+      excel: [".xlsx", ".xls"]
+      json: [".json"]
+      parquet: [".parquet"]
+      
+    # Default options for different formats
+    default_options:
+      csv:
+        delimiter: ","
+        header: true
+        infer_schema: true
+        encoding: "utf-8"
+        
+      tsv:
+        delimiter: "\t"
+        header: true
+        infer_schema: true
+        encoding: "utf-8"
+        
+      excel:
+        sheet_name: 0                      # First sheet
+        header: 0                          # First row as header
+        
+      json:
+        multiline: true
+        
+      parquet: {}                          # No special options needed
+      
+    # File handling
+    save_uploaded_files: true              # Save uploaded files to output directory
+    timestamp_uploaded_files: true        # Add timestamp to uploaded file names
+    max_file_size_mb: 500                 # Maximum upload file size in MB
+    
+  # Existing Files Configuration
+  existing_files:
+    # Search directories (relative to AutoML package)
+    search_directories:
+      - "."                               # Current directory
+      - "./"                              # Current directory alternative
+      
+    # Known dataset files
+    known_datasets:
+      - "bank.csv"
+      - "IRIS.csv"
+      - "bank"
+      - "iris"
+      
+    # Case sensitivity for file matching
+    case_sensitive: false
+    
+    # File extensions to search for
+    search_extensions:
+      - ".csv"
+      - ".xlsx"
+      - ".xls"
+      - ".json"
+      - ".parquet"
+      - ".tsv"
+      - ".tab"
+      
+  # Data Preview Configuration
+  preview:
+    enabled: true
+    max_rows: 5                           # Number of rows to show in preview
+    show_schema: true                     # Show column types and schema
+    show_statistics: true                 # Show basic statistics (row count, etc.)
+    
+  # Validation Configuration
+  validation:
+    enabled: true
+    check_null_values: true               # Check for null/missing values
+    check_data_types: true                # Validate data types
+    check_column_names: true              # Validate column names
+    max_validation_rows: 10000            # Maximum rows to use for validation
+    
+  # Error Handling
+  error_handling:
+    retry_attempts: 3                     # Number of retry attempts for failed loads
+    fallback_to_basic: true               # Fall back to basic file loading on error
+    detailed_error_messages: true         # Show detailed error messages
+    
+  # Caching (for BigQuery and large files)
+  caching:
+    enabled: false                        # Enable caching of loaded data
+    cache_directory: "temp/data_cache"    # Directory for cached data
+    cache_expiry_hours: 24                # Cache expiry time in hours
+    max_cache_size_gb: 2                  # Maximum cache size in GB 
