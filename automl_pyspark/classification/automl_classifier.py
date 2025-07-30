@@ -1304,6 +1304,7 @@ class AutoMLClassifier:
                     print("⚠️ OOT1 data will be skipped due to missing target column")
                     oot1_scaled = None
                 else:
+                    # Identify any missing raw feature columns required by the preprocessing pipeline
                     missing_columns = [col for col in original_column_names if col not in oot1_data.columns]
                     if missing_columns:
                         print(f"⚠️ OOT1 data missing columns: {missing_columns}")
@@ -1314,22 +1315,22 @@ class AutoMLClassifier:
                     else:
                         # Apply the same preprocessing pipeline that was fitted on training data
                         oot1_processed = self._apply_preprocessing(oot1_data)
-                    print(f"✅ OOT1 preprocessing completed. Columns: {oot1_processed.columns}")
-                    
-                    # Check if the preprocessed data has all required columns for scaling
-                    scaling_columns = [col for col in self.selected_vars if col != target_column]
-                    missing_scaling_columns = [col for col in scaling_columns if col not in oot1_processed.columns]
-                    
-                    if missing_scaling_columns:
-                        print(f"⚠️ OOT1 data missing columns for scaling: {missing_scaling_columns}")
-                        print(f"Available columns after preprocessing: {oot1_processed.columns}")
-                        print(f"Required columns for scaling: {scaling_columns}")
-                        print("⚠️ OOT1 data will be skipped due to missing scaling columns")
-                        oot1_scaled = None
-                    else:
-                        # Apply scaling using the fitted pipeline
-                        oot1_scaled = self.data_processor.apply_scaling(oot1_processed, target_column)
-                        print(f"✅ OOT1 scaling completed. Final columns: {oot1_scaled.columns}")
+                        # Only proceed if preprocessing was successful
+                        if oot1_processed is not None:
+                            print(f"✅ OOT1 preprocessing completed. Columns: {oot1_processed.columns}")
+                            # Check if the preprocessed data has all required columns for scaling
+                            scaling_columns = [col for col in self.selected_vars if col != target_column]
+                            missing_scaling_columns = [col for col in scaling_columns if col not in oot1_processed.columns]
+                            if missing_scaling_columns:
+                                print(f"⚠️ OOT1 data missing columns for scaling: {missing_scaling_columns}")
+                                print(f"Available columns after preprocessing: {oot1_processed.columns}")
+                                print(f"Required columns for scaling: {scaling_columns}")
+                                print("⚠️ OOT1 data will be skipped due to missing scaling columns")
+                                oot1_scaled = None
+                            else:
+                                # Apply scaling using the fitted pipeline
+                                oot1_scaled = self.data_processor.apply_scaling(oot1_processed, target_column)
+                                print(f"✅ OOT1 scaling completed. Final columns: {oot1_scaled.columns}")
                 
             except Exception as e:
                 print(f"❌ Error processing OOT1 data: {str(e)}")
@@ -1360,6 +1361,7 @@ class AutoMLClassifier:
                     print("⚠️ OOT2 data will be skipped due to missing target column")
                     oot2_scaled = None
                 else:
+                    # Identify any missing raw feature columns required by the preprocessing pipeline
                     missing_columns = [col for col in original_column_names if col not in oot2_data.columns]
                     if missing_columns:
                         print(f"⚠️ OOT2 data missing columns: {missing_columns}")
@@ -1370,22 +1372,21 @@ class AutoMLClassifier:
                     else:
                         # Apply the same preprocessing pipeline that was fitted on training data
                         oot2_processed = self._apply_preprocessing(oot2_data)
-                    print(f"✅ OOT2 preprocessing completed. Columns: {oot2_processed.columns}")
-                    
-                    # Check if the preprocessed data has all required columns for scaling
-                    scaling_columns = [col for col in self.selected_vars if col != target_column]
-                    missing_scaling_columns = [col for col in scaling_columns if col not in oot2_processed.columns]
-                    
-                    if missing_scaling_columns:
-                        print(f"⚠️ OOT2 data missing columns for scaling: {missing_scaling_columns}")
-                        print(f"Available columns after preprocessing: {oot2_processed.columns}")
-                        print(f"Required columns for scaling: {scaling_columns}")
-                        print("⚠️ OOT2 data will be skipped due to missing scaling columns")
-                        oot2_scaled = None
-                    else:
-                        # Apply scaling using the fitted pipeline
-                        oot2_scaled = self.data_processor.apply_scaling(oot2_processed, target_column)
-                        print(f"✅ OOT2 scaling completed. Final columns: {oot2_scaled.columns}")
+                        if oot2_processed is not None:
+                            print(f"✅ OOT2 preprocessing completed. Columns: {oot2_processed.columns}")
+                            # Check if the preprocessed data has all required columns for scaling
+                            scaling_columns = [col for col in self.selected_vars if col != target_column]
+                            missing_scaling_columns = [col for col in scaling_columns if col not in oot2_processed.columns]
+                            if missing_scaling_columns:
+                                print(f"⚠️ OOT2 data missing columns for scaling: {missing_scaling_columns}")
+                                print(f"Available columns after preprocessing: {oot2_processed.columns}")
+                                print(f"Required columns for scaling: {scaling_columns}")
+                                print("⚠️ OOT2 data will be skipped due to missing scaling columns")
+                                oot2_scaled = None
+                            else:
+                                # Apply scaling using the fitted pipeline
+                                oot2_scaled = self.data_processor.apply_scaling(oot2_processed, target_column)
+                                print(f"✅ OOT2 scaling completed. Final columns: {oot2_scaled.columns}")
                 
             except Exception as e:
                 print(f"❌ Error processing OOT2 data: {str(e)}")
