@@ -334,8 +334,8 @@ flexible_data_input:
       
     # Authentication settings
     authentication:
-      method: "service_account"            # auto, service_account, gcloud
-      service_account_path: "/path/to/your/service-account-key.json"  # Path to service account JSON file
+      method: "auto"                       # auto, service_account, gcloud
+      service_account_path: ""             # Path to service account JSON file
       
     # Performance settings
     performance:

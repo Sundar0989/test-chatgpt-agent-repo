@@ -29,31 +29,36 @@ class BackgroundJobManager:
         """Clean configuration to remove non-JSON-serializable objects."""
         import copy
         
-        # Create a new clean config (avoid deepcopy of UploadedFile objects)
-        clean_config = {}
-        
-        # Copy all top-level keys except problematic ones
-        for key, value in config.items():
-            if key == 'enhanced_data_config' and value:
-                # Handle enhanced_data_config specially
-                enhanced_config = {}
-                for sub_key, sub_value in value.items():
-                    if sub_key == 'data_source' and hasattr(sub_value, 'name'):
-                        # This is an UploadedFile object
-                        uploaded_file = sub_value
-                        enhanced_config['data_source'] = f"uploaded_{uploaded_file.name}"
-                        enhanced_config['original_filename'] = uploaded_file.name
-                        enhanced_config['file_size'] = uploaded_file.size
-                        enhanced_config['file_type'] = uploaded_file.type if hasattr(uploaded_file, 'type') else 'unknown'
-                    else:
-                        # Copy other enhanced_data_config fields normally
-                        enhanced_config[sub_key] = copy.deepcopy(sub_value) if sub_value is not None else None
-                clean_config[key] = enhanced_config
+        def clean_value(value):
+            """Recursively clean a value to make it JSON serializable."""
+            if value is None:
+                return None
+            elif isinstance(value, dict):
+                return {k: clean_value(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [clean_value(v) for v in value]
+            elif hasattr(value, 'name') and hasattr(value, 'size'):
+                # This is likely an UploadedFile object
+                return {
+                    'type': 'uploaded_file',
+                    'name': value.name,
+                    'size': value.size,
+                    'file_type': getattr(value, 'type', 'unknown')
+                }
+            elif hasattr(value, '__dict__'):
+                # Handle other objects with attributes
+                try:
+                    return str(value)
+                except:
+                    return f"<{type(value).__name__} object>"
             else:
-                # Copy other top-level fields normally
-                clean_config[key] = copy.deepcopy(value) if value is not None else None
+                # Try to copy normally
+                try:
+                    return copy.deepcopy(value)
+                except:
+                    return str(value)
         
-        return clean_config
+        return clean_value(config)
         
     def start_job(self, job_id: str, config: Dict) -> bool:
         """Start a job in the background."""
@@ -67,8 +72,8 @@ class BackgroundJobManager:
             with open(config_file, 'w') as f:
                 json.dump(clean_config, f, indent=2)
             
-            # Create job script
-            script_content = self._create_job_script(job_id, config)
+            # Create job script using the cleaned config
+            script_content = self._create_job_script(job_id, clean_config)
             script_file = os.path.join(self.jobs_dir, f"{job_id}_script.py")
             
             with open(script_file, 'w') as f:
@@ -109,6 +114,62 @@ class BackgroundJobManager:
         job_status_file = os.path.join(self.jobs_dir, f"{job_id}_status.txt")
         job_error_file = os.path.join(self.jobs_dir, f"{job_id}_error.log")
         
+        # Helper function to load OOT datasets
+        oot_loading_helper = '''
+def load_oot_datasets(config, data_manager=None, oot_bigquery_options=None):
+    """Helper function to load OOT datasets based on configuration."""
+    oot1_data = None
+    oot2_data = None
+    
+    # Handle OOT1 - check for BigQuery table first, then file
+    if config.get('oot1_bigquery_table'):
+        log_message('{job_id}', f"📅 Loading OOT1 data from BigQuery: {{config['oot1_bigquery_table']}}")
+        if data_manager and oot_bigquery_options:
+            oot1_data, _ = data_manager.load_data(config['oot1_bigquery_table'], 'bigquery', **oot_bigquery_options)
+        else:
+            oot1_data = config['oot1_bigquery_table']  # Pass as string for backward compatibility
+    elif config.get('oot1_file'):
+        log_message('{job_id}', f"📅 Loading OOT1 data from file: {{config['oot1_file']}}")
+        if data_manager:
+            oot1_data, _ = data_manager.load_data(config['oot1_file'], 'existing')
+        else:
+            oot1_data = config['oot1_file']  # Pass as string for backward compatibility
+    elif config.get('oot1_config'):
+        oot1_config = config['oot1_config']
+        if oot1_config.get('source_type') == 'bigquery':
+            log_message('{job_id}', f"📅 Loading OOT1 data from BigQuery: {{oot1_config['data_source']}}")
+            if data_manager:
+                bigquery_options = oot1_config.get('options', {{}})
+                oot1_data, _ = data_manager.load_data(oot1_config['data_source'], 'bigquery', **bigquery_options)
+            else:
+                oot1_data = oot1_config['data_source']  # Pass as string for backward compatibility
+    
+    # Handle OOT2 - check for BigQuery table first, then file
+    if config.get('oot2_bigquery_table'):
+        log_message('{job_id}', f"📅 Loading OOT2 data from BigQuery: {{config['oot2_bigquery_table']}}")
+        if data_manager and oot_bigquery_options:
+            oot2_data, _ = data_manager.load_data(config['oot2_bigquery_table'], 'bigquery', **oot_bigquery_options)
+        else:
+            oot2_data = config['oot2_bigquery_table']  # Pass as string for backward compatibility
+    elif config.get('oot2_file'):
+        log_message('{job_id}', f"📅 Loading OOT2 data from file: {{config['oot2_file']}}")
+        if data_manager:
+            oot2_data, _ = data_manager.load_data(config['oot2_file'], 'existing')
+        else:
+            oot2_data = config['oot2_file']  # Pass as string for backward compatibility
+    elif config.get('oot2_config'):
+        oot2_config = config['oot2_config']
+        if oot2_config.get('source_type') == 'bigquery':
+            log_message('{job_id}', f"📅 Loading OOT2 data from BigQuery: {{oot2_config['data_source']}}")
+            if data_manager:
+                bigquery_options = oot2_config.get('options', {{}})
+                oot2_data, _ = data_manager.load_data(oot2_config['data_source'], 'bigquery', **bigquery_options)
+            else:
+                oot2_data = oot2_config['data_source']  # Pass as string for backward compatibility
+    
+    return oot1_data, oot2_data
+'''
+        
         script_template = '''
 import sys
 import os
@@ -126,6 +187,8 @@ if automl_dir not in sys.path:
 parent_dir = os.path.dirname(automl_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
+
+{oot_loading_helper}
 
 def log_message(job_id, message):
     """Log a message to the job log file."""
@@ -357,9 +420,6 @@ try:
             log_message('{job_id}', f"🎯 Starting {{task_type}} training with BigQuery data...")
             
             # Handle OOT datasets if provided
-            oot1_data = None
-            oot2_data = None
-            
             # Create OOT-specific options (same WHERE clause and column selection, but no sampling/limiting)
             oot_bigquery_options = {{}}
             if enhanced_data_config.get('options'):
@@ -374,21 +434,8 @@ try:
                 if oot_bigquery_options.get('select_columns'):
                     log_message('{job_id}', f"   📝 Column selection: {{oot_bigquery_options['select_columns']}}")
             
-            # Handle OOT1 - check for BigQuery table first, then file
-            if config.get('oot1_bigquery_table'):
-                log_message('{job_id}', f"📅 Loading OOT1 data from BigQuery: {{config['oot1_bigquery_table']}}")
-                oot1_data, _ = data_manager.load_data(config['oot1_bigquery_table'], 'bigquery', **oot_bigquery_options)
-            elif config.get('oot1_file'):
-                log_message('{job_id}', f"📅 Loading OOT1 data from file: {{config['oot1_file']}}")
-                oot1_data, _ = data_manager.load_data(config['oot1_file'], 'file')
-            
-            # Handle OOT2 - check for BigQuery table first, then file
-            if config.get('oot2_bigquery_table'):
-                log_message('{job_id}', f"📅 Loading OOT2 data from BigQuery: {{config['oot2_bigquery_table']}}")
-                oot2_data, _ = data_manager.load_data(config['oot2_bigquery_table'], 'bigquery', **oot_bigquery_options)
-            elif config.get('oot2_file'):
-                log_message('{job_id}', f"📅 Loading OOT2 data from file: {{config['oot2_file']}}")
-                oot2_data, _ = data_manager.load_data(config['oot2_file'], 'file')
+            # Load OOT datasets using helper function
+            oot1_data, oot2_data = load_oot_datasets(config, data_manager, oot_bigquery_options)
             
             automl.fit(
                 train_data=train_data,
@@ -433,28 +480,8 @@ try:
             log_message('{job_id}', f"🎯 Starting {{task_type}} training with enhanced file data...")
             
             # Handle OOT datasets if provided
-            oot1_data = None
-            oot2_data = None
-            
-            # Handle OOT1 - check configuration for appropriate loading method
-            oot1_config = config.get('oot1_config')
-            if oot1_config and oot1_config.get('source_type') == 'bigquery':
-                log_message('{job_id}', f"📅 Loading OOT1 data from BigQuery: {{oot1_config['data_source']}}")
-                bigquery_options = oot1_config.get('options', {{}})
-                oot1_data, _ = data_manager.load_data(oot1_config['data_source'], 'bigquery', **bigquery_options)
-            elif config.get('oot1_file'):
-                log_message('{job_id}', f"📅 Loading OOT1 data from file: {{config['oot1_file']}}")
-                oot1_data, _ = data_manager.load_data(config['oot1_file'], 'file')
-            
-            # Handle OOT2 - check configuration for appropriate loading method
-            oot2_config = config.get('oot2_config')
-            if oot2_config and oot2_config.get('source_type') == 'bigquery':
-                log_message('{job_id}', f"📅 Loading OOT2 data from BigQuery: {{oot2_config['data_source']}}")
-                bigquery_options = oot2_config.get('options', {{}})
-                oot2_data, _ = data_manager.load_data(oot2_config['data_source'], 'bigquery', **bigquery_options)
-            elif config.get('oot2_file'):
-                log_message('{job_id}', f"📅 Loading OOT2 data from file: {{config['oot2_file']}}")
-                oot2_data, _ = data_manager.load_data(config['oot2_file'], 'file')
+            # Load OOT datasets using helper function
+            oot1_data, oot2_data = load_oot_datasets(config, data_manager)
             
             automl.fit(
                 train_data=train_data,
@@ -479,9 +506,6 @@ try:
             log_message('{job_id}', f"🎯 Starting {{task_type}} training...")
             
             # Handle OOT datasets if provided
-            oot1_data = None
-            oot2_data = None
-            
             # Create OOT-specific options for BigQuery datasets (same WHERE clause and column selection, but no sampling/limiting)
             oot_bigquery_options = {{}}
             if enhanced_data_config and enhanced_data_config.get('source_type') == 'bigquery' and enhanced_data_config.get('options'):
@@ -496,41 +520,8 @@ try:
                 if oot_bigquery_options.get('select_columns'):
                     log_message('{job_id}', f"   📝 Column selection: {{oot_bigquery_options['select_columns']}}")
             
-            # Handle OOT1 - check for BigQuery table first, then file
-            if config.get('oot1_bigquery_table'):
-                log_message('{job_id}', f"📅 Loading OOT1 data from BigQuery: {{config['oot1_bigquery_table']}}")
-                if oot_bigquery_options:
-                    # Use DataInputManager for BigQuery with options
-                    from data_input_manager import DataInputManager
-                    data_manager = DataInputManager(
-                        spark=automl.spark,
-                        output_dir=config['output_dir'],
-                        user_id=config['user_id']
-                    )
-                    oot1_data, _ = data_manager.load_data(config['oot1_bigquery_table'], 'bigquery', **oot_bigquery_options)
-                else:
-                    oot1_data = config['oot1_bigquery_table']  # Pass as string for backward compatibility
-            elif config.get('oot1_file'):
-                oot1_data = config['oot1_file']
-                log_message('{job_id}', f"📅 OOT1 file configured: {{oot1_data}}")
-            
-            # Handle OOT2 - check for BigQuery table first, then file
-            if config.get('oot2_bigquery_table'):
-                log_message('{job_id}', f"📅 Loading OOT2 data from BigQuery: {{config['oot2_bigquery_table']}}")
-                if oot_bigquery_options:
-                    # Use DataInputManager for BigQuery with options
-                    from data_input_manager import DataInputManager
-                    data_manager = DataInputManager(
-                        spark=automl.spark,
-                        output_dir=config['output_dir'],
-                        user_id=config['user_id']
-                    )
-                    oot2_data, _ = data_manager.load_data(config['oot2_bigquery_table'], 'bigquery', **oot_bigquery_options)
-                else:
-                    oot2_data = config['oot2_bigquery_table']  # Pass as string for backward compatibility
-            elif config.get('oot2_file'):
-                oot2_data = config['oot2_file']
-                log_message('{job_id}', f"📅 OOT2 file configured: {{oot2_data}}")
+            # Load OOT datasets using helper function
+            oot1_data, oot2_data = load_oot_datasets(config, None, oot_bigquery_options)
             
             automl.fit(
                 train_data=config['data_file'],
@@ -594,7 +585,8 @@ except Exception as e:
             job_status_file=job_status_file,
             job_error_file=job_error_file,
             task_type=task_type,
-            task_type_title=task_type_title
+            task_type_title=task_type_title,
+            oot_loading_helper=oot_loading_helper
         )
 
     def _run_job_background(self, job_id: str, script_file: str):
