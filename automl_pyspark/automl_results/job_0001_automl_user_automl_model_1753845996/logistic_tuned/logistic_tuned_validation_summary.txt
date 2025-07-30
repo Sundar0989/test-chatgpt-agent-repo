@@ -1,0 +1,26 @@
+============================================================
+VALIDATION SUMMARY - LOGISTIC_TUNED
+============================================================
+
+TRAIN DATASET:
+  ROC: 0.6645
+  Accuracy: 0.8706
+  KS: 25.0800
+
+VALID DATASET:
+  ROC: 0.6576
+  Accuracy: 0.8716
+  KS: 24.1200
+
+TEST DATASET:
+  ROC: 0.6623
+  Accuracy: 0.8623
+  KS: 23.2400
+
+============================================================
+Generated files:
+- logistic_tuned_metrics.z (joblib format)
+- logistic_tuned_metrics.json (JSON format)
+- decile_table_*.xlsx (for each dataset)
+- ks_plot_logistic_tuned.png
+============================================================
