@@ -17,13 +17,26 @@ import signal
 import sys
 
 class BackgroundJobManager:
-    """Manages background AutoML job execution."""
-    
-    def __init__(self, jobs_dir: str = "automl_jobs"):
+    """
+    Manages background AutoML job execution.  By default jobs are
+    executed in local background threads.  Optionally, jobs can be
+    dispatched to an external message queue (e.g. Google Cloud Pub/Sub
+    or Cloud Tasks) to enable more scalable execution.  Set the
+    environment variable ``USE_GCP_QUEUE`` to ``true`` or pass
+    ``use_gcp_queue=True`` when constructing the manager to enable
+    queue-based dispatch.  When using a queue, the job configuration
+    JSON will be published and a separate worker (e.g. Cloud Run
+    service) should subscribe to process jobs.
+    """
+
+    def __init__(self, jobs_dir: str = "automl_jobs", use_gcp_queue: bool | None = None):
         self.jobs_dir = jobs_dir
         self.running_jobs: Dict[str, subprocess.Popen] = {}
         self.job_logs: Dict[str, queue.Queue] = {}
         self.job_threads: Dict[str, threading.Thread] = {}
+        # Determine whether to use an external queue either from parameter or environment
+        env_flag = os.getenv("USE_GCP_QUEUE", "false").lower() in ("1", "true", "yes")
+        self.use_gcp_queue = use_gcp_queue if use_gcp_queue is not None else env_flag
     
     def _clean_config_for_json(self, config: Dict) -> Dict:
         """Clean configuration to remove non-JSON-serializable objects."""
@@ -81,21 +94,125 @@ class BackgroundJobManager:
             
             # Create log queue for this job
             self.job_logs[job_id] = queue.Queue()
-            
-            # Start job in background thread
-            thread = threading.Thread(
-                target=self._run_job_background,
-                args=(job_id, script_file),
-                daemon=True
-            )
-            thread.start()
-            self.job_threads[job_id] = thread
-            
-            # Update status to Running (not Submitted)
-            self._update_job_status(job_id, "Running")
-            self._log_job_message(job_id, f"🚀 Job {job_id} started at {datetime.now().isoformat()}")
-            
+
+            if self.use_gcp_queue:
+                # When using an external queue, publish the job configuration
+                # instead of launching it locally.  The worker environment
+                # should retrieve the config file from jobs_dir and execute
+                # the job.  Publishing is wrapped in a try/except to avoid
+                # crashing the UI if credentials are not configured.  Logs
+                # will reflect whether publishing was attempted.
+                try:
+                    self._publish_job_to_queue(job_id, clean_config)
+                    self._update_job_status(job_id, "Submitted")
+                    self._log_job_message(job_id, f"📤 Job {job_id} published to message queue at {datetime.now().isoformat()}")
+                except Exception as e:
+                    self._log_job_message(job_id, f"❌ Failed to publish job to queue: {e}")
+                    self._update_job_status(job_id, "Failed")
+                    return False
+            else:
+                # Start job in background thread locally
+                thread = threading.Thread(
+                    target=self._run_job_background,
+                    args=(job_id, script_file),
+                    daemon=True
+                )
+                thread.start()
+                self.job_threads[job_id] = thread
+                # Update status to Running (not Submitted)
+                self._update_job_status(job_id, "Running")
+                self._log_job_message(job_id, f"🚀 Job {job_id} started at {datetime.now().isoformat()}")
             return True
+
+    def _publish_job_to_queue(self, job_id: str, config: Dict) -> None:
+        """
+        Publish a job configuration to an external message queue.  The
+        method supports two queue backends: Google Cloud Pub/Sub and
+        Cloud Tasks.  When the environment variable ``USE_GCP_TASKS``
+        is set to ``true`` (case-insensitive), the job will be
+        dispatched via Cloud Tasks.  Otherwise Pub/Sub is used by
+        default.  Required environment variables for each mode are
+        documented below.
+
+        **Pub/Sub Mode (default)**
+            Set ``GCP_PUBSUB_TOPIC`` to the full topic path (e.g.
+            ``projects/my-project/topics/my-topic``).  The
+            ``google-cloud-pubsub`` library must be installed.
+
+        **Cloud Tasks Mode**
+            Set ``USE_GCP_TASKS=true`` and provide the following
+            variables:
+
+            * ``GCP_TASKS_PROJECT`` – project ID where the queue
+              resides.
+            * ``GCP_TASKS_LOCATION`` – location/region of the queue.
+            * ``GCP_TASKS_QUEUE`` – name of the queue.
+            * ``CLOUD_RUN_BASE_URL`` – base URL of the Cloud Run
+              service that will process tasks.
+            * ``SERVICE_ACCOUNT_EMAIL`` – (optional) service account
+              email used for the OIDC token.  If omitted the email is
+              inferred from the service account key.
+
+        The job configuration is JSON serialised and included in the
+        message or HTTP task body along with the job ID.
+        """
+        import json
+        # Determine whether to use Cloud Tasks
+        use_tasks = os.getenv('USE_GCP_TASKS', 'false').lower() in ('1', 'true', 'yes')
+        if use_tasks:
+            # Defer to Cloud Tasks helper.  Import lazily to avoid
+            # dependency if unused.
+            try:
+                from automl_pyspark.gcp_helpers import create_http_task  # type: ignore
+            except Exception as e:
+                raise RuntimeError(
+                    "Cloud Tasks dispatch requested but google-cloud-tasks is not installed. "
+                    "Install via 'pip install google-cloud-tasks' and set USE_GCP_TASKS=false to fall back to Pub/Sub."
+                ) from e
+            project = os.getenv('GCP_TASKS_PROJECT')
+            location = os.getenv('GCP_TASKS_LOCATION')
+            queue = os.getenv('GCP_TASKS_QUEUE')
+            base_url = os.getenv('CLOUD_RUN_BASE_URL')
+            if not all([project, location, queue, base_url]):
+                raise RuntimeError(
+                    "GCP_TASKS_PROJECT, GCP_TASKS_LOCATION, GCP_TASKS_QUEUE and CLOUD_RUN_BASE_URL must be set "
+                    "when USE_GCP_TASKS is true."
+                )
+            # Determine the target path from config.  For clustering,
+            # classification and regression jobs, we post to a generic
+            # '/run-job' endpoint.  Downstream services can inspect the
+            # payload to decide how to handle the job.
+            target_path = os.getenv('GCP_TASKS_TARGET_PATH', '/run-job')
+            service_account_email = os.getenv('SERVICE_ACCOUNT_EMAIL')
+            payload = {'job_id': job_id, 'config': config}
+            # Create HTTP task
+            response = create_http_task(
+                project=project,
+                location=location,
+                queue=queue,
+                target_path=target_path,
+                json_payload=payload,
+                task_id=job_id,
+                service_account_email=service_account_email or None
+            )
+            # We don't wait for result; Cloud Tasks returns immediately
+            return
+        else:
+            # Use Pub/Sub
+            try:
+                from google.cloud import pubsub_v1  # type: ignore
+            except Exception as e:
+                raise RuntimeError(
+                    "google-cloud-pubsub library is not installed or configured. "
+                    "Install via 'pip install google-cloud-pubsub' or set USE_GCP_TASKS=true to use Cloud Tasks."
+                ) from e
+            topic_path = os.getenv('GCP_PUBSUB_TOPIC')
+            if not topic_path:
+                raise RuntimeError("GCP_PUBSUB_TOPIC environment variable must be set when using Pub/Sub dispatch.")
+            publisher = pubsub_v1.PublisherClient()
+            message_bytes = json.dumps({'job_id': job_id, 'config': config}).encode('utf-8')
+            future = publisher.publish(topic_path, message_bytes, job_id=job_id)
+            future.result(timeout=10)
             
         except Exception as e:
             # Log detailed error information

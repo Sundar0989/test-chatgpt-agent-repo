@@ -551,63 +551,51 @@ class ClusteringHyperparameterTuner:
             return gaussian.fit(train_data)
         
         elif model_type == 'dbscan':
+            # Build a DBSCAN model using scikit‑learn.  Capture the Spark
+            # session from the training DataFrame to avoid referencing
+            # undefined attributes on the wrapper.  This wrapper mirrors
+            # the one in ClusteringModelBuilder._create_dbscan_model.
             if not SKLEARN_AVAILABLE:
                 raise ImportError("DBSCAN requires sklearn. Install with: pip install scikit-learn")
-            
-            # Create DBSCAN wrapper
+
             eps = params.get('eps', 0.5)
             minPts = params.get('minPts', 5)
-            
+            spark_session = train_data.sparkSession
+
             class DBSCANWrapper:
-                def __init__(self, eps, minPts):
-                    self.eps = eps
-                    self.minPts = minPts
+                def __init__(self, eps_val: float, min_pts: int):
+                    self.eps = eps_val
+                    self.minPts = min_pts
                     self.model = None
                     self.scaler = StandardScaler()
-                
-                def fit(self, data):
-                    # Extract features from PySpark DataFrame
-                    features_list = []
-                    for row in data.select("features").collect():
-                        features_list.append(row.features.toArray())
-                    
+
+                def fit(self, data: DataFrame):
+                    # Extract features and fit DBSCAN
+                    features_list = [row.features.toArray() for row in data.select("features").collect()]
                     features_array = np.array(features_list)
-                    
-                    # Scale features for DBSCAN
                     features_scaled = self.scaler.fit_transform(features_array)
-                    
-                    # Fit DBSCAN
                     self.model = DBSCAN(eps=self.eps, min_samples=self.minPts)
                     self.model.fit(features_scaled)
-                    
                     return self
-                
-                def transform(self, data):
-                    # Extract features
-                    features_list = []
-                    for row in data.select("features").collect():
-                        features_list.append(row.features.toArray())
-                    
+
+                def transform(self, data: DataFrame) -> DataFrame:
+                    from pyspark.sql.functions import monotonically_increasing_id
+                    # Extract and scale features
+                    features_list = [row.features.toArray() for row in data.select("features").collect()]
                     features_array = np.array(features_list)
-                    
-                    # Scale features
                     features_scaled = self.scaler.transform(features_array)
-                    
                     # Predict clusters
                     predictions = self.model.fit_predict(features_scaled)
-                    
-                    # Convert back to PySpark DataFrame format
-                    from pyspark.sql.types import StructType, StructField, IntegerType
-                    from pyspark.sql import Row
-                    import numpy as np
-                    
-                    prediction_rows = [Row(prediction=int(pred)) for pred in predictions]
-                    prediction_df = self.spark.createDataFrame(prediction_rows, StructType([StructField("prediction", IntegerType(), False)]))
-                    
-                    # Join with original data
-                    result = data.crossJoin(prediction_df.limit(data.count()))
+                    # Build predictions DataFrame with row indices
+                    pred_rows = [(int(pred),) for pred in predictions]
+                    pred_df = spark_session.createDataFrame(pred_rows, ["prediction"])
+                    pred_df = pred_df.withColumn("row_index", monotonically_increasing_id())
+                    # Attach row indices to original data
+                    data_with_index = data.withColumn("row_index", monotonically_increasing_id())
+                    # Join predictions to original data and drop index
+                    result = data_with_index.join(pred_df, on="row_index").drop("row_index")
                     return result
-            
+
             dbscan = DBSCANWrapper(eps, minPts)
             return dbscan.fit(train_data)
         

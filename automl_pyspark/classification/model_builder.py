@@ -200,43 +200,200 @@ class ModelBuilder:
                 'build_func': lightgbm_model
             }
     
-    def build_model(self, train_data: DataFrame, features_col: str, 
+    def build_model(self, train_data: DataFrame, features_col: str,
                    label_col: str, model_type: str, **params) -> Any:
         """
-        Build a classification model.
-        
+        Build a classification model.  This method uses provided
+        hyperparameters (if any) to override the defaults defined in
+        the individual model builder functions.  Without explicit
+        parameters the default settings are used.
+
         Args:
             train_data: Training DataFrame
             features_col: Name of the features column
             label_col: Name of the label column
             model_type: Type of model to build
-            **params: Additional model parameters
-            
+            **params: Additional model parameters (e.g. hyperparameters)
+
         Returns:
             Trained model
         """
         if model_type not in self.model_types:
             raise ValueError(f"Unsupported model type: {model_type}")
-        
+
         print(f"Building {model_type} model...")
-        
-        # Get model configuration
-        model_config = self.model_types[model_type]
-        build_func = model_config['build_func']
-        
-        # Build model using the original function
-        if model_type == 'neural_network':
-            feature_count = params.get('feature_count')  # Extract feature_count from params
-            num_classes = params.get('num_classes', 2)  # Extract num_classes from params, default to 2
-            model = build_func(train_data, features_col, label_col, feature_count, num_classes)
-        elif model_type in ['xgboost', 'lightgbm']:
-            num_classes = params.get('num_classes', 2)  # Extract num_classes for advanced models
-            model = build_func(train_data, features_col, label_col, num_classes)
+
+        # Extract hyperparameters relevant for this model
+        # Remove keys that are not model hyperparameters
+        hyperparams = {k: v for k, v in params.items() if k not in ['feature_count', 'num_classes']}
+
+        # Dispatch to specialized builder when hyperparameters are supplied
+        if hyperparams:
+            print(f"   🔧 Using optimized parameters: {hyperparams}")
+            model = self._build_model_with_hyperparams(
+                train_data, features_col, label_col, model_type, hyperparams, params
+            )
         else:
-            model = build_func(train_data, features_col, label_col)
-        
+            # Use the default build function
+            model_config = self.model_types[model_type]
+            build_func = model_config['build_func']
+            if model_type == 'neural_network':
+                feature_count = params.get('feature_count')
+                num_classes = params.get('num_classes', 2)
+                model = build_func(train_data, features_col, label_col, feature_count, num_classes)
+            elif model_type in ['xgboost', 'lightgbm']:
+                num_classes = params.get('num_classes', 2)
+                model = build_func(train_data, features_col, label_col, num_classes)
+            else:
+                model = build_func(train_data, features_col, label_col)
+
         print(f"{model_type} model built successfully.")
         return model
+
+    def _build_model_with_hyperparams(self, train_data: DataFrame, features_col: str,
+                                      label_col: str, model_type: str,
+                                      hyperparams: Dict[str, Any], all_params: Dict[str, Any]) -> Any:
+        """
+        Internal helper to construct a classification model using
+        supplied hyperparameters.  Only parameters relevant to the
+        specific model type are used.  Parameters not specified fall
+        back to sensible defaults.
+
+        Args:
+            train_data: Training DataFrame
+            features_col: Name of the features column
+            label_col: Name of the label column
+            model_type: Type of model to build
+            hyperparams: Dictionary of hyperparameters
+            all_params: Original params dict (may include feature_count, num_classes)
+
+        Returns:
+            Trained model using the specified hyperparameters
+        """
+        from pyspark.ml.classification import (
+            LogisticRegression, RandomForestClassifier, GBTClassifier,
+            DecisionTreeClassifier, MultilayerPerceptronClassifier
+        )
+
+        # Determine number of classes for advanced models
+        num_classes = all_params.get('num_classes', 2)
+
+        if model_type == 'logistic':
+            lr = LogisticRegression(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxIter=hyperparams.get('maxIter', 10),
+                regParam=hyperparams.get('regParam', 0.0),
+                elasticNetParam=hyperparams.get('elasticNetParam', 0.0)
+            )
+            return lr.fit(train_data)
+        elif model_type == 'random_forest':
+            rf = RandomForestClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                numTrees=hyperparams.get('numTrees', 10),
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                minInstancesPerNode=hyperparams.get('minInstancesPerNode', 1),
+                subsamplingRate=hyperparams.get('subsamplingRate', 1.0),
+                featureSubsetStrategy=hyperparams.get('featureSubsetStrategy', 'auto'),
+                seed=42
+            )
+            return rf.fit(train_data)
+        elif model_type == 'gradient_boosting':
+            # Apply gradient boosting optimisations
+            from pyspark.sql import SparkSession
+            spark = SparkSession.getActiveSession()
+            if spark:
+                try:
+                    import sys, os
+                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if parent_dir not in sys.path:
+                        sys.path.insert(0, parent_dir)
+                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
+                    apply_gradient_boosting_optimizations(spark)
+                except Exception:
+                    pass
+            gb = GBTClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxIter=hyperparams.get('maxIter', 50),
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                stepSize=hyperparams.get('stepSize', 0.1),
+                subsamplingRate=hyperparams.get('subsamplingRate', 1.0),
+                seed=42
+            )
+            return gb.fit(train_data)
+        elif model_type == 'decision_tree':
+            dt = DecisionTreeClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                minInstancesPerNode=hyperparams.get('minInstancesPerNode', 1),
+                minInfoGain=hyperparams.get('minInfoGain', 0.0),
+                seed=42
+            )
+            return dt.fit(train_data)
+        elif model_type == 'neural_network':
+            # For MLP, use feature_count and num_classes from original params
+            feature_count = all_params.get('feature_count')
+            layers = hyperparams.get('layers')
+            # If specific layers are provided (list of ints), use them; otherwise derive from feature_count
+            if layers is None and feature_count:
+                layers = [feature_count, feature_count*3, feature_count*2, num_classes]
+            mlp = MultilayerPerceptronClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                layers=layers,
+                maxIter=hyperparams.get('maxIter', 100),
+                blockSize=hyperparams.get('blockSize', 512),
+                seed=42
+            )
+            return mlp.fit(train_data)
+        elif model_type == 'xgboost':
+            if not XGBOOST_AVAILABLE:
+                raise ImportError("XGBoost not available. Install with: pip install xgboost>=1.6.0")
+            from xgboost.spark import SparkXGBClassifier
+            xgb = SparkXGBClassifier(
+                features_col=features_col,
+                label_col=label_col,
+                max_depth=hyperparams.get('maxDepth', 6),
+                n_estimators=hyperparams.get('numRound', 100),
+                eta=hyperparams.get('eta', 0.3),
+                subsample=hyperparams.get('subsample', 1.0),
+                colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
+                min_child_weight=hyperparams.get('min_child_weight', 1),
+                gamma=hyperparams.get('gamma', 0.0),
+                num_workers=hyperparams.get('num_workers', 1),
+                use_gpu=hyperparams.get('use_gpu', False)
+            )
+            return xgb.fit(train_data)
+        elif model_type == 'lightgbm':
+            if not LIGHTGBM_AVAILABLE:
+                raise ImportError("LightGBM not available. Install with: pip install synapseml>=0.11.0")
+            from synapse.ml.lightgbm import LightGBMClassifier
+            # Determine objective based on number of classes
+            objective = 'multiclass' if num_classes > 2 else 'binary'
+            lgb = LightGBMClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                objective=objective,
+                numLeaves=hyperparams.get('numLeaves', 31),
+                numIterations=hyperparams.get('numIterations', 100),
+                learningRate=hyperparams.get('learningRate', 0.1),
+                featureFraction=hyperparams.get('featureFraction', 1.0),
+                baggingFraction=hyperparams.get('baggingFraction', 1.0),
+                lambdaL1=hyperparams.get('lambdaL1', 0.0),
+                lambdaL2=hyperparams.get('lambdaL2', 0.0),
+                seed=42
+            )
+            return lgb.fit(train_data)
+        else:
+            # Fallback to default builder if not handled
+            build_func = self.model_types[model_type]['build_func']
+            return build_func(train_data, features_col, label_col)
     
     def create_estimator(self, features_col: str, label_col: str, model_type: str, **params) -> Any:
         """
@@ -256,75 +413,119 @@ class ModelBuilder:
         
         print(f"Creating {model_type} estimator for cross-validation...")
         
-        # Create unfitted estimators
+        # Create unfitted estimators.  If hyperparameters are passed via params,
+        # they override the default settings used for each estimator.  Only
+        # relevant keys are applied.
+        hyperparams = {k: v for k, v in params.items() if k not in ['feature_count', 'num_classes']}
+
         if model_type == 'logistic':
-            estimator = LogisticRegression(featuresCol=features_col, labelCol=label_col, maxIter=10)
+            estimator = LogisticRegression(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxIter=hyperparams.get('maxIter', 10),
+                regParam=hyperparams.get('regParam', 0.0),
+                elasticNetParam=hyperparams.get('elasticNetParam', 0.0)
+            )
         elif model_type == 'random_forest':
-            estimator = RandomForestClassifier(featuresCol=features_col, labelCol=label_col, numTrees=10)
+            estimator = RandomForestClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                numTrees=hyperparams.get('numTrees', 10),
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                minInstancesPerNode=hyperparams.get('minInstancesPerNode', 1),
+                subsamplingRate=hyperparams.get('subsamplingRate', 1.0),
+                featureSubsetStrategy=hyperparams.get('featureSubsetStrategy', 'auto'),
+                seed=42
+            )
         elif model_type == 'gradient_boosting':
-            estimator = GBTClassifier(featuresCol=features_col, labelCol=label_col, maxIter=10)
+            # Apply gradient boosting optimisations
+            from pyspark.sql import SparkSession
+            spark = SparkSession.getActiveSession()
+            if spark:
+                try:
+                    import sys, os
+                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if parent_dir not in sys.path:
+                        sys.path.insert(0, parent_dir)
+                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
+                    apply_gradient_boosting_optimizations(spark)
+                except Exception:
+                    pass
+            estimator = GBTClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxIter=hyperparams.get('maxIter', 50),
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                stepSize=hyperparams.get('stepSize', 0.1),
+                subsamplingRate=hyperparams.get('subsamplingRate', 1.0),
+                seed=42
+            )
         elif model_type == 'decision_tree':
-            estimator = DecisionTreeClassifier(featuresCol=features_col, labelCol=label_col, maxDepth=5)
+            estimator = DecisionTreeClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxDepth=hyperparams.get('maxDepth', 5),
+                maxBins=hyperparams.get('maxBins', 32),
+                minInstancesPerNode=hyperparams.get('minInstancesPerNode', 1),
+                minInfoGain=hyperparams.get('minInfoGain', 0.0),
+                seed=42
+            )
         elif model_type == 'neural_network':
             feature_count = params.get('feature_count', 10)
             num_classes = params.get('num_classes', 2)
-            layers = [feature_count, feature_count*3, feature_count*2, num_classes]
+            # Allow user-specified layers, else derive default
+            layers = hyperparams.get('layers')
+            if layers is None and feature_count:
+                layers = [feature_count, feature_count*3, feature_count*2, num_classes]
             estimator = MultilayerPerceptronClassifier(
-                featuresCol=features_col, labelCol=label_col, 
-                maxIter=100, layers=layers, blockSize=512, seed=12345
+                featuresCol=features_col,
+                labelCol=label_col,
+                maxIter=hyperparams.get('maxIter', 100),
+                layers=layers,
+                blockSize=hyperparams.get('blockSize', 512),
+                seed=42
             )
         elif model_type == 'xgboost':
             if not XGBOOST_AVAILABLE:
                 raise ImportError("XGBoost not available. Install with: pip install xgboost>=1.6.0")
-            num_classes = params.get('num_classes', 2)
-            # Note: SparkXGBClassifier automatically determines objective based on label data
+            from xgboost.spark import SparkXGBClassifier
             estimator = SparkXGBClassifier(
                 features_col=features_col,
                 label_col=label_col,
-                max_depth=6,
-                n_estimators=100,
-                num_workers=1,
-                use_gpu=False
+                max_depth=hyperparams.get('maxDepth', 6),
+                n_estimators=hyperparams.get('numRound', 100),
+                eta=hyperparams.get('eta', 0.3),
+                subsample=hyperparams.get('subsample', 1.0),
+                colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
+                min_child_weight=hyperparams.get('min_child_weight', 1),
+                gamma=hyperparams.get('gamma', 0.0),
+                num_workers=hyperparams.get('num_workers', 1),
+                use_gpu=hyperparams.get('use_gpu', False)
             )
         elif model_type == 'lightgbm':
             if not LIGHTGBM_AVAILABLE:
                 raise ImportError("LightGBM not available. Install with: pip install synapseml>=0.11.0")
-            
-            try:
-                num_classes = params.get('num_classes', 2)
-                if num_classes > 2:
-                    # Multi-class classification
-                    estimator = LightGBMClassifier(
-                        featuresCol=features_col,
-                        labelCol=label_col,
-                        objective="multiclass",
-                        numLeaves=31,
-                        numIterations=100,
-                        learningRate=0.1
-                    )
-                 #   estimator = estimator.setNumClass(num_classes)
-                else:
-                    # Binary classification
-                    estimator = LightGBMClassifier(
-                        featuresCol=features_col,
-                        labelCol=label_col,
-                        objective="binary",
-                        numLeaves=31,
-                        numIterations=100,
-                        learningRate=0.1
-                    )
-            except Exception as e:
-                if "'JavaPackage' object is not callable" in str(e):
-                    raise ImportError(
-                        "SynapseML JARs not loaded in Spark session. "
-                        "Use 'from spark_optimization_config import create_optimized_spark_session; "
-                        "spark = create_optimized_spark_session(include_lightgbm=True)' to create a properly configured session."
-                    ) from e
-                else:
-                    raise e
+            from synapse.ml.lightgbm import LightGBMClassifier
+            num_classes = params.get('num_classes', 2)
+            objective = 'multiclass' if num_classes > 2 else 'binary'
+            estimator = LightGBMClassifier(
+                featuresCol=features_col,
+                labelCol=label_col,
+                objective=objective,
+                numLeaves=hyperparams.get('numLeaves', 31),
+                numIterations=hyperparams.get('numIterations', 100),
+                learningRate=hyperparams.get('learningRate', 0.1),
+                featureFraction=hyperparams.get('featureFraction', 1.0),
+                baggingFraction=hyperparams.get('baggingFraction', 1.0),
+                lambdaL1=hyperparams.get('lambdaL1', 0.0),
+                lambdaL2=hyperparams.get('lambdaL2', 0.0),
+                seed=42
+            )
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
-        
+
         print(f"{model_type} estimator created successfully.")
         return estimator
 
