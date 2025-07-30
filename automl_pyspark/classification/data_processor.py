@@ -938,55 +938,84 @@ class DataProcessor:
                           target_label_indexer: Optional[Any] = None) -> DataFrame:
         """
         Apply preprocessing pipeline to new data.
-        
+
+        This method takes raw data and applies the same preprocessing steps that were
+        fitted on the training data.  A key difference from the original implementation
+        is that it starts from the *raw* feature variables rather than the final
+        selected variables.  This ensures that categorical variables are available for
+        encoding on out‑of‑time (OOT) datasets.  After encoding and imputation the
+        output DataFrame is trimmed back to the selected feature set.
+
         Args:
-            data: Input DataFrame
-            feature_vars: List of feature variables
-            selected_vars: List of selected variables
-            categorical_vars: List of categorical variables
-            numerical_vars: List of numerical variables
-            char_labels: Fitted string indexer pipeline
-            impute_value: Value to use for imputation
+            data: Input DataFrame containing the raw feature columns
+            feature_vars: List of original feature variables (before encoding)
+            selected_vars: List of selected variables (includes encoded names)
+            categorical_vars: List of categorical variables (raw names)
+            numerical_vars: List of numerical variables (raw names)
+            char_labels: Fitted StringIndexer pipeline used to encode categorical vars
+            impute_value: Value to use for numerical imputation
             target_column: Name of target column to preserve (optional)
             target_label_indexer: Fitted StringIndexer for target column (optional)
-            
-        Returns:
-            Preprocessed DataFrame
-        """
 
-        
+        Returns:
+            Preprocessed DataFrame with columns matching the selected_vars list (plus
+            target column if present)
+        """
+        # Select only the raw feature columns that exist in the new data.  We use
+        # feature_vars (the unencoded feature names) here so that categorical
+        # variables are available for encoding.  Later we will restrict to
+        # selected_vars.
+        raw_cols = [col for col in feature_vars if col in data.columns]
+
         # Filter out any date columns that might be in the new data (for OOT consistency)
-        available_columns = [col for col in selected_vars if col in data.columns]
-        filtered_columns = self._filter_date_columns(data, available_columns)
-        
-        # Update columns_to_select to only include non-date columns that exist in the data
-        columns_to_select = filtered_columns
-        
-        # Add target column back if it exists and was specified (target columns are not filtered)
+        # Date/timestamp features are removed automatically during training; apply the same here
+        filtered_cols = self._filter_date_columns(data, raw_cols)
+
+        # Build list of columns to select from the raw data
+        columns_to_select = list(filtered_cols)
+
+        # If a target column exists and was provided, include it in the selection
         if target_column and target_column in data.columns and target_column not in columns_to_select:
             columns_to_select.append(target_column)
-        
+
+        # Create a DataFrame with only the necessary columns
         X = data.select(columns_to_select)
-        
-        # Apply target column encoding if target column is present and indexer is available
+
+        # Apply target label encoding if necessary
         if target_column and target_column in X.columns and target_label_indexer is not None:
             X = target_label_indexer.transform(X)
             # Replace original target column with indexed version
             X = X.drop(target_column).withColumnRenamed(target_column + "_indexed", target_column)
-        
-        # Apply categorical encoding
+
+        # Apply categorical encoding using the fitted pipeline
+        # The pipeline requires the raw categorical variables to be present in the DataFrame
         if char_labels is not None:
             X = char_labels.transform(X)
-        
-        # Apply numerical imputation
+
+        # Apply numerical imputation on the raw numerical variables
+        # Note: imputation will have no effect if columns are already numeric
         X = numerical_imputation(X, numerical_vars, impute_value)
-        
-        # Remove original categorical columns
-        X = X.select([c for c in X.columns if c not in categorical_vars])
-        
-        # No need to rename columns since categorical_to_index now creates _encoded suffix directly
-        # X = rename_columns(X, categorical_vars)
-        
+
+        # Remove original categorical columns (retain only encoded versions)
+        # If categorical_vars list is empty, this will simply keep all columns
+        if categorical_vars:
+            X = X.select([c for c in X.columns if c not in categorical_vars])
+
+        # At this point X contains numeric columns and encoded categorical columns.  Restrict
+        # the DataFrame to only the selected variables (encoded names) plus the target column.
+        final_columns: List[str] = []
+        for col_name in selected_vars:
+            if col_name in X.columns:
+                final_columns.append(col_name)
+        # Include the target column if present and not already included
+        if target_column and target_column in X.columns and target_column not in final_columns:
+            final_columns.append(target_column)
+
+        # Select the final columns for output.  If final_columns is empty (e.g., no matching
+        # selected variables), return the DataFrame as is to avoid empty DataFrames.
+        if final_columns:
+            X = X.select(final_columns)
+
         return X
     
     def analyze_class_distribution(self, data: DataFrame, target_column: str) -> Dict[str, Any]:

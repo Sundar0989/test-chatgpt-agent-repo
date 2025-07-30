@@ -432,10 +432,13 @@ class RegressionHyperparameterTuner:
                     'minInstancesPerNode': [1, 5]
                 }
             elif model_type == 'gradient_boosting':
+                # Restrict gradient boosting grid search to modest values to avoid
+                # excessive memory usage and large broadcasted tasks
                 return {
-                    'maxIter': [50, 100, 150],
-                    'maxDepth': [5, 8, 12],
-                    'stepSize': [0.05, 0.1, 0.2]
+                    'maxIter': [20, 40, 60],
+                    'maxDepth': [3, 5, 7],
+                    'stepSize': [0.05, 0.1, 0.2],
+                    'maxBins': [32, 48, 64]
                 }
             elif model_type == 'decision_tree':
                 return {
@@ -461,12 +464,13 @@ class RegressionHyperparameterTuner:
                     'maxBins': (64, 256)  # Minimum 64 to handle high-cardinality categorical features safely
                 }
             elif model_type == 'gradient_boosting':
+                # Limit the search space for gradient boosting to mitigate large task binaries
                 return {
-                    'maxIter': (50, 200),
-                    'maxDepth': (3, 15),
-                    'stepSize': (0.01, 0.3),
+                    'maxIter': (10, 60),
+                    'maxDepth': (3, 8),
+                    'stepSize': (0.05, 0.3),
                     'subsamplingRate': (0.5, 1.0),
-                    'maxBins': (32, 128)  # Reduced range to minimize task binary size for gradient boosting
+                    'maxBins': (32, 64)
                 }
             elif model_type == 'decision_tree':
                 return {
@@ -545,14 +549,17 @@ class RegressionHyperparameterTuner:
                 except Exception as e:
                     print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
             
+            # Build a GBTRegressor with conservative defaults.  By keeping the
+            # number of iterations and depth modest, we reduce the size of
+            # broadcasted task binaries and improve stability.
             gbt = GBTRegressor(
                 featuresCol='features',
                 labelCol=target_column,
-                maxIter=params.get('maxIter', 100),
-                maxDepth=params.get('maxDepth', 6),
+                maxIter=params.get('maxIter', 50),
+                maxDepth=params.get('maxDepth', 5),
                 stepSize=params.get('stepSize', 0.1),
                 subsamplingRate=params.get('subsamplingRate', 1.0),
-                maxBins=params.get('maxBins', 64),  # Reduced default from 128 to 64 to minimize task binary size
+                maxBins=params.get('maxBins', 64),
             )
             return gbt.fit(train_data)
         
