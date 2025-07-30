@@ -727,6 +727,91 @@ class RegressionDataProcessor:
         """
         # For now, return data as-is. Scaling can be implemented as needed.
         return data
+
+    def apply_preprocessing(self, data: DataFrame,
+                            feature_vars: List[str],
+                            selected_vars: List[str],
+                            categorical_vars: List[str],
+                            numerical_vars: List[str],
+                            char_labels: Optional[PipelineModel],
+                            impute_value: float,
+                            target_column: Optional[str] = None,
+                            target_label_indexer: Optional[Any] = None) -> DataFrame:
+        """
+        Apply the fitted preprocessing pipeline to a new dataset.
+
+        This function mirrors the classification data processor's `apply_preprocessing` method.
+        It starts from the raw feature columns to ensure categorical variables exist for
+        encoding, applies the stored categorical encoding pipeline, performs numerical
+        imputation, drops original categorical columns, and finally selects only the
+        encoded feature columns present in `selected_vars` (plus the target column if present).
+
+        Args:
+            data: The raw input DataFrame to preprocess.
+            feature_vars: Original list of feature names used during training (before encoding).
+            selected_vars: List of selected encoded feature names from training.
+            categorical_vars: List of raw categorical variable names.
+            numerical_vars: List of raw numerical variable names.
+            char_labels: Fitted StringIndexer pipeline used to encode categorical variables.
+            impute_value: Value used for numerical imputation.
+            target_column: Name of the target column (optional).
+            target_label_indexer: Fitted StringIndexer for the target column (optional).
+
+        Returns:
+            Preprocessed DataFrame with columns matching `selected_vars` (and target column).
+        """
+        # Start by selecting the raw feature columns that exist in the new data
+        raw_cols = [c for c in feature_vars if c in data.columns]
+
+        # Filter out any obvious date/timestamp columns (simple heuristic)
+        filtered_cols = []
+        for col_name in raw_cols:
+            try:
+                dtype = dict(data.dtypes).get(col_name)
+                if dtype not in ["timestamp", "date"]:
+                    filtered_cols.append(col_name)
+            except Exception:
+                filtered_cols.append(col_name)
+
+        columns_to_select = list(filtered_cols)
+        # Include target column if provided
+        if target_column and target_column in data.columns and target_column not in columns_to_select:
+            columns_to_select.append(target_column)
+
+        X = data.select(columns_to_select)
+
+        # Apply target label encoding if necessary (rare for regression)
+        if target_column and target_label_indexer is not None and target_column in X.columns:
+            try:
+                X = target_label_indexer.transform(X)
+                X = X.drop(target_column).withColumnRenamed(f"{target_column}_indexed", target_column)
+            except Exception:
+                pass  # If encoding fails, assume target is already numeric
+
+        # Apply categorical encoding using fitted pipeline
+        if char_labels is not None:
+            X = char_labels.transform(X)
+
+        # Impute numerical variables
+        if numerical_vars:
+            X = numerical_imputation(X, numerical_vars, impute_value)
+
+        # Drop original categorical variables
+        if categorical_vars:
+            X = X.select([c for c in X.columns if c not in categorical_vars])
+
+        # Select only the selected_vars (encoded feature names) plus target column
+        final_columns: List[str] = []
+        for col_name in selected_vars:
+            if col_name in X.columns:
+                final_columns.append(col_name)
+        if target_column and target_column in X.columns and target_column not in final_columns:
+            final_columns.append(target_column)
+
+        if final_columns:
+            X = X.select(final_columns)
+
+        return X
     
     def _restart_spark_session(self):
         """Restart Spark session if needed."""
@@ -796,12 +881,20 @@ class RegressionDataProcessor:
         
         if oot1_data is not None:
             print("🔄 Processing OOT1 data...")
-            oot1_df, _, _ = self._apply_preprocessing_transformations(
-                oot1_data, categorical_vars, numerical_vars, kwargs.get('impute_value', 0.0)
+            # Apply the same preprocessing pipeline used on training data
+            oot1_df = self.apply_preprocessing(
+                oot1_data,
+                feature_vars,
+                selected_vars,
+                categorical_vars,
+                numerical_vars,
+                self.char_labels,
+                kwargs.get('impute_value', -999),
+                target_column,
+                getattr(self, 'target_label_indexer', None)
             )
-            
-            # Clean OOT1 data: Remove null/NaN values in target column
-            if target_column in oot1_df.columns:
+            # Clean OOT1 data: remove null/NaN values in target column
+            if target_column and target_column in oot1_df.columns:
                 print("🔍 Cleaning OOT1 target column...")
                 from pyspark.sql.functions import isnull, isnan
                 original_count = oot1_df.count()
@@ -812,12 +905,20 @@ class RegressionDataProcessor:
         
         if oot2_data is not None:
             print("🔄 Processing OOT2 data...")
-            oot2_df, _, _ = self._apply_preprocessing_transformations(
-                oot2_data, categorical_vars, numerical_vars, kwargs.get('impute_value', 0.0)
+            # Apply the same preprocessing pipeline used on training data
+            oot2_df = self.apply_preprocessing(
+                oot2_data,
+                feature_vars,
+                selected_vars,
+                categorical_vars,
+                numerical_vars,
+                self.char_labels,
+                kwargs.get('impute_value', -999),
+                target_column,
+                getattr(self, 'target_label_indexer', None)
             )
-            
-            # Clean OOT2 data: Remove null/NaN values in target column
-            if target_column in oot2_df.columns:
+            # Clean OOT2 data: remove null/NaN values in target column
+            if target_column and target_column in oot2_df.columns:
                 print("🔍 Cleaning OOT2 target column...")
                 from pyspark.sql.functions import isnull, isnan
                 original_count = oot2_df.count()
@@ -829,10 +930,15 @@ class RegressionDataProcessor:
         # Create feature vectors for all datasets
         print("🔄 Creating feature vectors...")
         
-        # Get all feature columns (numerical + encoded categorical)
-        all_feature_cols = numerical_vars.copy()
-        for cat_var in categorical_vars:
-            all_feature_cols.append(f"{cat_var}_encoded")
+        # Determine feature columns for assembling vectors. If selected_vars are available
+        # (resulting from feature selection), use them; otherwise fall back to all numeric and
+        # encoded categorical variables. Exclude the target column from the feature list.
+        if self.selected_vars:
+            all_feature_cols = [c for c in self.selected_vars if c != target_column]
+        else:
+            all_feature_cols = numerical_vars.copy()
+            for cat_var in categorical_vars:
+                all_feature_cols.append(f"{cat_var}_encoded")
         
         # Create assembler
         assembler = VectorAssembler(inputCols=all_feature_cols, outputCol="features")

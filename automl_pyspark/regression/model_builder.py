@@ -59,29 +59,33 @@ def random_forest_regression_model(train, x, y):
 
 
 def gradient_boosting_regression_model(train, x, y):
-    """Build Gradient Boosting Regression model with optimizations to reduce large task binary warnings."""
-    # Apply gradient boosting specific optimizations to reduce broadcasting warnings
+    """
+    Build a Gradient Boosting Regression model with conservative defaults.  By limiting
+    the number of iterations and using fewer bins, the model trains faster and
+    avoids large broadcast task binaries that can destabilise a Spark session.
+    """
+    # Apply gradient boosting specific optimisations to reduce broadcasting warnings
     from pyspark.sql import SparkSession
     spark = SparkSession.getActiveSession()
     if spark:
         try:
-            # Import and apply optimizations
             import sys
             import os
             parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
-            from spark_optimization_config import apply_gradient_boosting_optimizations
+            from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
             apply_gradient_boosting_optimizations(spark)
         except Exception as e:
-            print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
+            # Optimisation module might be missing; log and continue
+            print(f"⚠️ Could not apply gradient boosting optimisations: {e}")
     
     gbt = GBTRegressor(
         featuresCol=x,
         labelCol=y,
-        maxIter=100,
+        maxIter=50,   # Fewer boosting iterations to reduce model complexity
         maxDepth=5,
-        maxBins=128,  # Reduced from 256 to 128 to reduce task binary size
+        maxBins=64,   # Smaller number of bins to reduce broadcast size
         seed=42
     )
     gbtModel = gbt.fit(train)

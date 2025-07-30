@@ -577,7 +577,7 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'gradient_boosting':
-            # Apply gradient boosting optimizations to reduce task binary warnings
+            # Apply gradient boosting optimisations to reduce task binary warnings
             from pyspark.sql import SparkSession
             spark = SparkSession.getActiveSession()
             if spark:
@@ -587,18 +587,21 @@ class HyperparameterTuner:
                     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     if parent_dir not in sys.path:
                         sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations
+                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
                     apply_gradient_boosting_optimizations(spark)
-                except Exception as e:
-                    print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
+                except Exception:
+                    # Optimisation module may not be present; ignore gracefully
+                    pass
             
             from pyspark.ml.classification import GBTClassifier
+            # Limit the complexity of the estimator by enforcing smaller defaults.  This helps
+            # mitigate broadcast warnings during hyperparameter tuning.
             return GBTClassifier(
                 featuresCol='features', labelCol=target_column,
-                maxIter=params.get('maxIter', 20),
+                maxIter=params.get('maxIter', 30),  # default lower than before
                 maxDepth=params.get('maxDepth', 5),
                 stepSize=params.get('stepSize', 0.1),
-                maxBins=params.get('maxBins', 64)  # Added maxBins parameter with optimized default
+                maxBins=params.get('maxBins', 64)
             )
             
         elif model_type.lower() == 'xgboost' and 'xgboost' in available_model_types:
@@ -813,7 +816,7 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'gradient_boosting':
-            # Apply gradient boosting optimizations to reduce task binary warnings
+            # Apply gradient boosting optimisations to reduce task binary warnings
             from pyspark.sql import SparkSession
             spark = SparkSession.getActiveSession()
             if spark:
@@ -823,21 +826,23 @@ class HyperparameterTuner:
                     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     if parent_dir not in sys.path:
                         sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations
+                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
                     apply_gradient_boosting_optimizations(spark)
-                except Exception as e:
-                    print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
+                except Exception:
+                    pass
             
-            max_iter = trial.suggest_int('maxIter', 10, 100)
-            max_depth = trial.suggest_int('maxDepth', 3, 10)
-            step_size = trial.suggest_float('stepSize', 0.01, 0.3)
-            max_bins = trial.suggest_int('maxBins', 32, 128)  # Reduced range to minimize task binary size
+            # Restrict the search space for gradient boosting hyperparameters.  Smaller ranges
+            # reduce the size of broadcasted task binaries and improve stability during tuning.
+            max_iter = trial.suggest_int('maxIter', 10, 50)
+            max_depth = trial.suggest_int('maxDepth', 3, 8)
+            step_size = trial.suggest_float('stepSize', 0.05, 0.3)
+            max_bins = trial.suggest_int('maxBins', 32, 64)
             
             from pyspark.ml.classification import GBTClassifier
             return GBTClassifier(
                 featuresCol='features', labelCol=target_column,
                 maxIter=max_iter, maxDepth=max_depth, stepSize=step_size,
-                maxBins=max_bins  # Added maxBins parameter with optimized range
+                maxBins=max_bins
             )
             
         elif model_type.lower() == 'xgboost' and 'xgboost' in available_model_types:

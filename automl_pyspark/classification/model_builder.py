@@ -43,29 +43,36 @@ def randomForest_model(train, x, y):
     return rfModel
 
 def gradientBoosting_model(train, x, y):
-    """Build Gradient Boosting Classification model with optimizations to reduce large task binary warnings."""
-    # Apply gradient boosting specific optimizations to reduce broadcasting warnings
+    """
+    Build a Gradient Boosting Classification model with sensible defaults to
+    minimise large broadcasted task binaries.  The number of boosting
+    iterations and the tree complexity are deliberately kept modest to
+    strike a balance between performance and resource usage.  A smaller
+    maxBins value further reduces memory consumption during tree building.
+    """
+    # Apply gradient boosting specific optimisations to reduce broadcasting warnings
     from pyspark.sql import SparkSession
     spark = SparkSession.getActiveSession()
     if spark:
         try:
-            # Import and apply optimizations
             import sys
             import os
             parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
-            from spark_optimization_config import apply_gradient_boosting_optimizations
+            from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
             apply_gradient_boosting_optimizations(spark)
         except Exception as e:
-            print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
+            # Fall back silently if optimisation module is unavailable
+            print(f"⚠️ Could not apply gradient boosting optimisations: {e}")
     
+    # Use reduced complexity settings compared to the previous implementation
     gb = GBTClassifier(
-        featuresCol=x, 
-        labelCol=y, 
-        maxIter=100,    # Increased from 10 for better performance
-        maxDepth=6,     # Added explicit maxDepth
-        maxBins=128     # Reduced from default 256 to reduce task binary size
+        featuresCol=x,
+        labelCol=y,
+        maxIter=50,   # Limit boosting iterations to avoid large task binaries
+        maxDepth=5,   # Slightly shallower trees
+        maxBins=64    # Smaller number of bins reduces the size of broadcasted tasks
     )
     gbModel = gb.fit(train)
     return gbModel
