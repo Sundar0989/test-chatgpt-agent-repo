@@ -1723,6 +1723,12 @@ def create_job_submission_page():
             
             **Example**: If elbow method suggests k=5, the system will test K-means, Bisecting K-means, etc. with 5 clusters and pick the best one using the evaluation metric below.
             """)
+
+        # Persist the current model selections in session state so other tabs
+        # (particularly the training parameters tab) can access the number of
+        # selected models.  This is useful for issuing warnings when
+        # hyperparameter tuning is enabled across many models.
+        st.session_state['model_selections'] = model_selections
     
     with tab3:
         st.header(f"Training Parameters - {task_type.title()}")
@@ -1767,8 +1773,15 @@ def create_job_submission_page():
         with col2:
             st.subheader("Hyperparameter Tuning")
             hp_settings = task_settings.get('hyperparameter_tuning', {})
-            enable_hp_tuning = st.checkbox("Enable Hyperparameter Tuning", 
-                                          value=hp_settings.get('enable_hyperparameter_tuning', False))
+            enable_hp_tuning = st.checkbox(
+                "Enable Hyperparameter Tuning",
+                value=hp_settings.get('enable_hyperparameter_tuning', False)
+            )
+            # Persist the hyperparameter tuning flag in session state so it can
+            # be inspected elsewhere (e.g. before job submission).  Without
+            # this, a local variable would be inaccessible when checking
+            # across pages or tabs.  We store as a boolean.
+            st.session_state['enable_hp_tuning'] = bool(enable_hp_tuning)
             
             if enable_hp_tuning:
                 hp_method = st.selectbox(
@@ -1897,6 +1910,25 @@ def create_job_submission_page():
                                 default=[3, 5, 7, 10],
                                 key="dbscan_minpts_multiselect"
                             )
+
+            # After all hyperparameter tuning selections, warn if too many models
+            # are selected with tuning enabled.  Long runtimes can lead to job
+            # timeout in the Streamlit front end.  Recommend increasing
+            # timeout_minutes or deselecting some models.
+            if enable_hp_tuning:
+                # Determine how many models the user has enabled
+                model_selections_state = st.session_state.get('model_selections', {})
+                try:
+                    num_models_selected = sum(1 for v in model_selections_state.values() if v)
+                except Exception:
+                    num_models_selected = 0
+                # Issue warning if more than three models are selected
+                if num_models_selected >= 3:
+                    st.warning(
+                        "⚠️ You have enabled hyperparameter tuning for multiple models. "
+                        "This can significantly increase runtime and may exceed the configured timeout. "
+                        "Consider increasing the timeout or reducing the number of selected models before submitting."
+                    )
                     
                     # Gaussian Mixture parameters
                     if st.checkbox("Customize Gaussian Mixture Parameters", value=False, key="gaussian_mixture_params_checkbox"):
@@ -2704,10 +2736,34 @@ def create_job_submission_page():
             except Exception as e:
                 st.error(f"Error previewing data: {str(e)}")
     
-    # Submit button
+    # Submit button and pre-submission warnings
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
-    
+
+    # Warn the user when hyperparameter tuning is enabled and many models are selected.
+    # Hyperparameter tuning dramatically increases training time as the pipeline
+    # must train multiple configurations per model.  If more than two or
+    # three models are selected concurrently, the default timeout may be
+    # exceeded.  We surface this warning outside of any specific tab so it
+    # appears immediately before job submission.
+    try:
+        enable_hp_flag = bool(st.session_state.get('enable_hp_tuning', False))
+        model_selections_state = st.session_state.get('model_selections', {})
+        num_models_selected = sum(1 for v in model_selections_state.values() if v)
+        # Issue warning if hyperparameter tuning is enabled and three or more models
+        # are selected.  This threshold can be adjusted based on performance.
+        if enable_hp_flag and num_models_selected >= 3:
+            st.warning(
+                "⚠️ You have enabled hyperparameter tuning for multiple models ("
+                f"{num_models_selected}). This can significantly increase runtime "
+                "and may exceed the configured timeout. Consider increasing the "
+                "timeout in your configuration or reducing the number of selected "
+                "models before submitting."
+            )
+    except Exception:
+        # Silently ignore any errors when computing the warning
+        pass
+
     with col2:
         # Use session state to prevent double submission
         if 'job_submission_in_progress' not in st.session_state:
@@ -3969,6 +4025,33 @@ def display_model_performance(output_dir: str, task_type: str = 'classification'
     if task_type == 'classification':
         with st.spinner("Loading classification metrics and tables..."):
             display_ks_decile_tables(output_dir)
+
+    # -- SHAP Explainability Section --
+    # Display SHAP summary plot and values for the best model if available.  SHAP
+    # values are computed by the AutoML pipeline and saved to the output
+    # directory as ``shap_summary_<task_type>.png`` and
+    # ``shap_values_<task_type>.csv``.  This section appears for all task types.
+    shap_summary_path = os.path.join(output_dir, f"shap_summary_{task_type}.png")
+    shap_values_path = os.path.join(output_dir, f"shap_values_{task_type}.csv")
+    if os.path.exists(shap_summary_path):
+        st.markdown("---")
+        st.subheader("🔍 Model Explainability (SHAP)")
+        try:
+            st.image(shap_summary_path, caption="SHAP Summary Plot for the Best Model", use_column_width=True)
+        except Exception as e:
+            st.warning(f"Unable to load SHAP summary plot: {e}")
+        # Display SHAP values table if available
+        if os.path.exists(shap_values_path):
+            try:
+                import pandas as pd  # Local import to avoid unnecessary overhead
+                shap_df = pd.read_csv(shap_values_path)
+                st.markdown("**Top SHAP Contributions (first 50 rows):**")
+                st.dataframe(shap_df.head(50))
+                st.caption("Note: Each row corresponds to a sample used for SHAP computation. Columns represent feature contributions.")
+            except Exception as e:
+                st.warning(f"Unable to load SHAP values CSV: {e}")
+        else:
+            st.info("SHAP values CSV not found.")
 
 def display_classification_metrics(df, output_dir: str = ""):
     """Display classification metrics with reorganized layout and grouped charts."""

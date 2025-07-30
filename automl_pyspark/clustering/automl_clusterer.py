@@ -807,6 +807,26 @@ class AutoMLClusterer:
         # Get clustering configuration
         clustering_config = self.config.get('clustering', {})
         models_config = clustering_config.get('models', {})
+
+        # ---------------------------------------------------------------
+        # Override model selections with flags passed via kwargs.  When
+        # the job is launched from the Streamlit UI, run flags (e.g.
+        # run_kmeans, run_dbscan) are provided through the config
+        # dictionary and forwarded as keyword arguments.  Without
+        # explicitly updating the models configuration here, the
+        # clusterer will fall back to whatever is defined in the YAML
+        # configuration, ignoring the user's selections.  This merge
+        # ensures that user‑specified model selections take precedence.
+        run_flags = {k: v for k, v in kwargs.items() if k.startswith('run_')}
+        if run_flags:
+            print(f"   🔄 Overriding model selections from job parameters: {run_flags}")
+            # Update the models_config in place and also the underlying
+            # self.config structure so that downstream components (like
+            # model selector) see the correct flags.
+            models_config.update(run_flags)
+            # If 'clustering' section exists, update it as well
+            if 'clustering' in self.config and 'models' in self.config['clustering']:
+                self.config['clustering']['models'].update(run_flags)
         
         # Train clustering models
         print("\n🤖 Building clustering models...")

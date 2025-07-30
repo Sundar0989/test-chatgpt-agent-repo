@@ -244,59 +244,73 @@ class ClusteringModelBuilder:
         return model_type in self.model_types
     
     def _create_dbscan_model(self, eps: float, minPts: int):
-        """Create a DBSCAN model wrapper for PySpark compatibility."""
+        """
+        Create a DBSCAN model wrapper for PySpark compatibility.
+
+        The returned wrapper scales features using scikit‑learn's StandardScaler,
+        fits a DBSCAN model on the scaled data, and provides a ``transform``
+        method that attaches cluster labels to the original Spark DataFrame.
+        To avoid referencing undefined ``spark`` attributes on the wrapper,
+        the outer SparkSession is captured via closure.
+        """
         if not SKLEARN_AVAILABLE:
             raise ImportError("DBSCAN requires sklearn. Install with: pip install scikit-learn")
-        
+
+        # Capture Spark session from the outer class.  This allows the wrapper to
+        # create DataFrames without accessing undefined attributes on itself.
+        spark_session = self.spark
+
         class DBSCANWrapper:
-            def __init__(self, eps, minPts):
-                self.eps = eps
-                self.minPts = minPts
+            def __init__(self, eps_val: float, min_pts: int):
+                self.eps = eps_val
+                self.minPts = min_pts
                 self.model = None
                 self.scaler = StandardScaler()
-            
-            def fit(self, data):
-                # Extract features from PySpark DataFrame
-                features_list = []
-                for row in data.select("features").collect():
-                    features_list.append(row.features.toArray())
-                
+
+            def fit(self, data: DataFrame):
+                """
+                Fit the DBSCAN model on the provided DataFrame.  The feature
+                vectors are collected to the driver, scaled and the sklearn
+                DBSCAN model is trained.  Returns ``self`` so that transform
+                can be called subsequently.
+                """
+                # Extract features from the DataFrame
+                features_list = [row.features.toArray() for row in data.select("features").collect()]
                 features_array = np.array(features_list)
-                
-                # Scale features for DBSCAN
+                # Scale features
                 features_scaled = self.scaler.fit_transform(features_array)
-                
                 # Fit DBSCAN
                 self.model = DBSCAN(eps=self.eps, min_samples=self.minPts)
                 self.model.fit(features_scaled)
-                
                 return self
-            
-            def transform(self, data):
-                # Extract features
-                features_list = []
-                for row in data.select("features").collect():
-                    features_list.append(row.features.toArray())
-                
+
+            def transform(self, data: DataFrame) -> DataFrame:
+                """
+                Assign cluster labels to each row in the provided DataFrame.
+                The function scales the input features using the scaler
+                learned during ``fit`` and predicts cluster labels using
+                the fitted DBSCAN model.  The labels are then joined back
+                to the original DataFrame by attaching a monotonically
+                increasing index to both the features and the predictions.
+                """
+                from pyspark.sql.functions import monotonically_increasing_id
+                from pyspark.sql.types import IntegerType
+                # Extract and scale features
+                features_list = [row.features.toArray() for row in data.select("features").collect()]
                 features_array = np.array(features_list)
-                
-                # Scale features
                 features_scaled = self.scaler.transform(features_array)
-                
-                # Predict clusters
+                # Predict cluster assignments (-1 represents noise)
                 predictions = self.model.fit_predict(features_scaled)
-                
-                # Convert back to PySpark DataFrame format
-                from pyspark.sql.types import StructType, StructField, IntegerType
-                from pyspark.sql import Row
-                
-                prediction_rows = [Row(prediction=int(pred)) for pred in predictions]
-                prediction_df = self.spark.createDataFrame(prediction_rows, StructType([StructField("prediction", IntegerType(), False)]))
-                
-                # Join with original data
-                result = data.crossJoin(prediction_df.limit(data.count()))
+                # Create a DataFrame for predictions with row indices
+                pred_rows = [(int(pred),) for pred in predictions]
+                pred_df = spark_session.createDataFrame(pred_rows, ["prediction"])
+                pred_df = pred_df.withColumn("row_index", monotonically_increasing_id())
+                # Attach row indices to original data
+                data_with_index = data.withColumn("row_index", monotonically_increasing_id())
+                # Join predictions back to the original data using the row index and drop it afterwards
+                result = data_with_index.join(pred_df, on="row_index").drop("row_index")
                 return result
-        
+
         return DBSCANWrapper(eps, minPts)
     
     def _build_dbscan_model(self, train_data: DataFrame, features_col: str, **params) -> Any:
