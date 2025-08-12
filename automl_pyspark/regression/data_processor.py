@@ -110,7 +110,7 @@ class RegressionDataProcessor:
         
         print(f"✅ RegressionDataProcessor initialized for user: {user_id}, model: {model_literal}")
     
-    def preprocess(self, data: DataFrame, target_column: str, config: Dict) -> tuple:
+    def preprocess(self, data: DataFrame, target_column: str, config: Dict, dataset_info: Optional[Dict] = None) -> tuple:
         """
         Preprocess data for regression.
         
@@ -118,6 +118,7 @@ class RegressionDataProcessor:
             data: Input DataFrame
             target_column: Name of the target column
             config: Configuration dictionary
+            dataset_info: Optional dataset information containing size info
             
         Returns:
             Tuple of (processed_data, feature_vars, selected_vars, categorical_vars, numerical_vars)
@@ -210,33 +211,112 @@ class RegressionDataProcessor:
         print(f"📊 Available features: {len(available_features)}, Configured max: {configured_max}")
         print(f"🎯 Will select: {actual_max_features} features")
         
-        self.selected_vars = self.select_features(processed_data, target_column, actual_max_features)
+        self.selected_vars = self.select_features(processed_data, target_column, actual_max_features, dataset_info)
         
         print(f"✅ Preprocessing completed. Selected {len(self.selected_vars)} features")
         
         return processed_data, self.feature_vars, self.selected_vars, self.categorical_vars, self.numerical_vars
     
-    def select_features(self, data: DataFrame, target_column: str, max_features: int = 30) -> List[str]:
+    def select_features(self, data: DataFrame, target_column: str, max_features: int = 30, dataset_info: Optional[Dict] = None) -> List[str]:
         """
-        Select features using Random Forest Regression feature importance.
+        Select features using Random Forest Regression feature importance with automatic sampling for large datasets.
         
         Args:
             data: Input DataFrame
             target_column: Name of the target column
             max_features: Maximum number of features to select
+            dataset_info: Optional dataset information containing size info
             
         Returns:
             List of selected feature names
         """
         print(f"🎯 Selecting top {max_features} features using Random Forest Regression...")
         
-        # Get numerical features for feature selection
-        numerical_features = [col for col in self.numerical_vars if col != target_column]
+        # Import the new feature selection module
+        try:
+            from ..feature_selection import random_forest_feature_selection
+        except ImportError:
+            try:
+                from feature_selection import random_forest_feature_selection
+            except ImportError:
+                # For direct script execution
+                import sys
+                import os
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
+                from feature_selection import random_forest_feature_selection
         
-        print(f"📊 Will rank all {len(numerical_features)} numerical features and select top {max_features}")
+        # Use provided dataset info or determine size
+        if dataset_info:
+            dataset_size = dataset_info.get('dataset_size', 'medium')
+            total_rows = dataset_info.get('total_rows')
+            total_columns = dataset_info.get('total_columns')
+            print(f"📊 Using provided dataset info: {dataset_size} ({total_rows:,} rows, {total_columns} columns)")
+        else:
+            # Fallback to calculation if dataset_info is not available
+            print("⚠️ Dataset info not provided, calculating size...")
+            try:
+                total_rows = data.count()
+                total_columns = len(data.columns)
+                if total_rows < 10000:
+                    dataset_size = 'small'
+                elif total_rows < 100000:
+                    dataset_size = 'medium'
+                else:
+                    dataset_size = 'large'
+                print(f"📊 Calculated dataset size: {dataset_size} ({total_rows:,} rows, {total_columns} columns)")
+            except Exception as e:
+                print(f"⚠️ Could not calculate dataset size: {e}")
+                dataset_size = 'medium'  # Default fallback
+                print(f"📊 Using default dataset size: {dataset_size}")
         
-        # Always run feature importance (max_features should already be adjusted by caller)
-        return self._run_feature_importance(data, numerical_features, target_column, max_features)
+        # Check if we should use the new Random Forest feature selection
+        use_new_rf_selection = True  # Always use new RF selection for regression
+        min_size_for_rf = 'small'  # Use RF selection for all sizes in regression
+        
+        # Define size hierarchy for comparison
+        size_hierarchy = {'small': 1, 'medium': 2, 'large': 3}
+        current_size_level = size_hierarchy.get(dataset_size, 2)
+        min_size_level = size_hierarchy.get(min_size_for_rf, 1)
+        
+        if use_new_rf_selection and current_size_level >= min_size_level:
+            print(f"🌳 Using enhanced Random Forest feature selection for {dataset_size} dataset...")
+            
+            # Get RF feature selection parameters
+            rf_max_features = max_features
+            importance_threshold = 0.01
+            
+            # Perform Random Forest feature selection
+            filtered_df, selected_features, feature_info = random_forest_feature_selection(
+                df=data,
+                target_column=target_column,
+                problem_type='regression',
+                spark=self.spark,
+                output_dir=self.output_dir if hasattr(self, 'output_dir') else '.',
+                user_id=self.user_id,
+                model_literal=self.model_literal,
+                max_features=rf_max_features,
+                importance_threshold=importance_threshold
+            )
+            
+            # Store feature selection info for later use
+            self.feature_selection_info = feature_info
+            
+            print(f"✅ Enhanced Random Forest feature selection completed!")
+            print(f"📊 Selected {len(selected_features)} features out of {feature_info.get('original_features', 'unknown')}")
+            
+            return selected_features
+        else:
+            print(f"📊 Using legacy feature selection for {dataset_size} dataset...")
+            
+            # Get numerical features for feature selection
+            numerical_features = [col for col in self.numerical_vars if col != target_column]
+            
+            print(f"📊 Will rank all {len(numerical_features)} numerical features and select top {max_features}")
+            
+            # Always run feature importance (max_features should already be adjusted by caller)
+            return self._run_feature_importance(data, numerical_features, target_column, max_features)
     
     def _run_feature_importance(self, data: DataFrame, feature_cols: List[str], 
                               target_column: str, num_features: int) -> List[str]:
@@ -857,7 +937,7 @@ class RegressionDataProcessor:
         
         # Preprocess training data
         processed_train, feature_vars, selected_vars, categorical_vars, numerical_vars = self.preprocess(
-            train_data, target_column, kwargs
+            train_data, target_column, kwargs, kwargs.get('dataset_info')
         )
         
         # Store preprocessing artifacts

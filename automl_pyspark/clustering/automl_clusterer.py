@@ -69,31 +69,10 @@ class AutoMLClusterer:
         self.actual_model_id = model_id or 'automl_model_id'
         self.actual_model_literal = model_literal or 'automl_model'
         
-        # Initialize Spark session with BigQuery optimization
+        # Use provided Spark session (managed by background job manager)
         if spark_session is None:
-            spark_config = get_optimized_spark_config(include_bigquery=True)
-            
-            # Override with BigQuery-optimized memory settings
-            spark_config.update({
-                "spark.driver.memory": "8g",  # Increased for BigQuery operations
-                "spark.driver.maxResultSize": "4g",  # Increased for BigQuery results
-                "spark.executor.memory": "4g",  # Increased for BigQuery processing
-            })
-            
-            builder = SparkSession.builder.appName("AutoML Clustering Pipeline (Optimized)")
-            
-            # Add BigQuery and SynapseML connector packages
-            packages = [
-                "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1",
-                "com.microsoft.azure:synapseml_2.12:1.0.3"
-            ]
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            
-            for key, value in spark_config.items():
-                builder = builder.config(key, value)
-            self.spark = builder.getOrCreate()
-        else:
-            self.spark = spark_session
+            raise ValueError("Spark session must be provided. All Spark sessions are now managed by the background job manager.")
+        self.spark = spark_session
         
         # Load configuration
         self.config_manager = ConfigManager(config_path, environment)
@@ -388,82 +367,9 @@ class AutoMLClusterer:
     
     def create_bigquery_spark_session(self, driver_memory: str = "64g", include_lightgbm: bool = True) -> SparkSession:
         """
-        Create a Spark session optimized for BigQuery data loading.
-        Uses the proven working configuration for BigQuery.
-        
-        Args:
-            driver_memory: Driver memory allocation (default: 64g for BigQuery)
-            include_lightgbm: If True, includes SynapseML JARs for LightGBM support
-            
-        Returns:
-            Spark session optimized for BigQuery + AutoML
+        DEPRECATED: Spark sessions are now managed by the background job manager.
         """
-        try:
-            print(f"🚀 Creating BigQuery-optimized Spark session for clustering...")
-            print(f"   💾 Driver memory: {driver_memory}")
-            print(f"   🔗 BigQuery connector: v0.36.1")
-            
-            # Stop existing session if needed
-            if hasattr(self, 'spark') and self.spark is not None:
-                print("🔄 Stopping existing Spark session for BigQuery compatibility...")
-                self.spark.stop()
-            
-            # Build Spark session with proven BigQuery configuration
-            builder = SparkSession.builder.appName("AutoML BigQuery Clusterer")
-            
-            # Add BigQuery connector package (proven working version)
-            packages = ["com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1"]
-            if include_lightgbm:
-                packages.append("com.microsoft.azure:synapseml_2.12:1.0.3")
-            
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            builder = builder.config("spark.driver.memory", driver_memory)
-            
-            # Apply AutoML optimizations
-            try:
-                base_config = get_optimized_spark_config(include_synapseml=include_lightgbm, include_bigquery=True)
-                
-                # Override with BigQuery-specific settings
-                bigquery_config = {
-                    "spark.driver.memory": driver_memory,
-                    "spark.driver.maxResultSize": "8g",
-                    "spark.executor.memory": "8g",
-                    "spark.sql.execution.arrow.pyspark.enabled": "true",
-                    "spark.sql.execution.arrow.pyspark.fallback.enabled": "true",
-                }
-                
-                # Apply all configurations
-                final_config = {**base_config, **bigquery_config}
-                for key, value in final_config.items():
-                    builder = builder.config(key, value)
-                    
-            except ImportError:
-                print("⚠️ Spark optimization config not available, using basic config")
-            
-            spark = builder.getOrCreate()
-            
-            print(f"✅ BigQuery-optimized Spark session created")
-            if include_lightgbm:
-                print("   🤖 LightGBM support included")
-            
-            # Update our spark reference
-            self.spark = spark
-            
-            # Update component spark references
-            if hasattr(self, 'data_processor'):
-                self.data_processor.spark = spark
-            if hasattr(self, 'model_builder'):
-                self.model_builder.spark = spark
-            if hasattr(self, 'model_validator'):
-                self.model_validator.spark = spark
-            if hasattr(self, 'hyperparameter_tuner'):
-                self.hyperparameter_tuner.spark = spark
-            
-            return spark
-            
-        except Exception as e:
-            print(f"❌ Failed to create BigQuery session: {e}")
-            raise
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def load_bigquery_data(self, 
                           project_id: str, 
@@ -828,152 +734,202 @@ class AutoMLClusterer:
             if 'clustering' in self.config and 'models' in self.config['clustering']:
                 self.config['clustering']['models'].update(run_flags)
         
-        # Train clustering models
-        print("\n🤖 Building clustering models...")
-        print(f"   📋 Models configuration: {models_config}")
+        # 🚀 PERSIST ALL DATASETS ONCE FOR ALL CLUSTERING MODELS
+        print("💾 Persisting all datasets once for all clustering model training and hyperparameter tuning...")
         
-        enabled_models = [name for name, enabled in models_config.items() if enabled]
-        print(f"   ✅ Enabled models: {enabled_models}")
+        # Track all datasets that need to be unpersisted
+        datasets_to_unpersist = []
         
-        if not enabled_models:
-            print("   ❌ No models are enabled in configuration!")
-            raise RuntimeError("No clustering models are enabled in configuration")
+        try:
+            if not train_df.is_cached:
+                train_df.persist()
+                datasets_to_unpersist.append(('train_df', train_df))
+                print(f"✅ Training data persisted: {train_df.count()} rows")
+            else:
+                print("ℹ️ Training data already persisted")
+        except Exception as e:
+            print(f"⚠️ Could not persist training data: {e}")
         
-        trained_models = {}
-        
-        for model_name, should_run in models_config.items():
-            print(f"   🔍 Checking model: {model_name} = {should_run}")
-            if should_run:
-                model_type = model_name.replace('run_', '')
+        # Persist validation datasets if they exist
+        for dataset_name, dataset in [('valid_df', valid_df), ('test_df', test_df), 
+                                     ('oot1_df', oot1_df), ('oot2_df', oot2_df)]:
+            if dataset is not None:
                 try:
-                    print(f"\n🔧 Training {model_type} model on training data...")
-                    
-                    # Tune hyperparameters on training data only
-                    # Merge clustering config with advanced params (contains Streamlit optuna_trials setting)
-                    clustering_config = self.config.get('clustering', {}).copy()
-                    
-                    # Advanced params are flattened into kwargs by background_job_manager
-                    hp_settings = {k: v for k, v in kwargs.items() 
-                                 if k in ['optuna_trials', 'optuna_timeout', 'random_trials', 'hp_method', 'enable_hyperparameter_tuning'] and v is not None}
-                    if hp_settings:
-                        if 'hyperparameter_tuning' not in clustering_config:
-                            clustering_config['hyperparameter_tuning'] = {}
-                        clustering_config['hyperparameter_tuning'].update(hp_settings)
-                        print(f"   📋 Using Streamlit hyperparameter settings: {hp_settings}")
-                    
-                    # Extract clustering hyperparameter ranges from advanced_params (passed via kwargs)
-                    clustering_hp_ranges = kwargs.get('clustering_hp_ranges', {})
-                    if clustering_hp_ranges:
-                        clustering_config['clustering_hp_ranges'] = clustering_hp_ranges
-                        print(f"   📋 Using Streamlit clustering hyperparameter ranges: {clustering_hp_ranges}")
-                    
-                    tuning_result = self.hyperparameter_tuner.tune_hyperparameters(
-                        model_type, train_df, clustering_config, k_range
-                    )
-                    
-                    # Always test all k values to enable proper elbow plot generation
-                    test_k_range = k_range or [2, 3, 4, 5]
-                    
-                    if tuning_result.get('best_params'):
-                        print(f"   🎯 Using optimized parameters: {tuning_result['best_params']}")
-                        # Still test all k values but with optimized other parameters
-                        other_params = {k: v for k, v in tuning_result['best_params'].items() if k != 'k'}
-                        model = self.model_builder.build_model(
-                            train_df, 'features', model_type, 
-                            k_range=test_k_range,
-                            use_elbow_method=self.use_elbow_method,
-                            **other_params
-                        )
+                    if not dataset.is_cached:
+                        dataset.persist()
+                        datasets_to_unpersist.append((dataset_name, dataset))
+                        print(f"✅ {dataset_name} persisted: {dataset.count()} rows")
                     else:
-                        # Build model with default parameters, testing all k values
-                        model = self.model_builder.build_model(
-                            train_df, 'features', model_type, 
-                            k_range=test_k_range,
-                            use_elbow_method=self.use_elbow_method
-                        )
-                    
-                    # ALWAYS perform multi-dataset validation when datasets are available
-                    print(f"   📊 Validating {model_type} model on different datasets...")
-                    
-                    # Prepare datasets for validation
-                    validation_datasets = [train_df]
-                    dataset_names = ['train']
-                    
-                    if valid_df is not None:
-                        validation_datasets.append(valid_df)
-                        dataset_names.append('validation')
-                        
-                    if test_df is not None:
-                        validation_datasets.append(test_df)
-                        dataset_names.append('test')
-                        
-                    if oot1_df is not None:
-                        validation_datasets.append(oot1_df)
-                        dataset_names.append('oot1')
-                        
-                    if oot2_df is not None:
-                        validation_datasets.append(oot2_df)
-                        dataset_names.append('oot2')
-                    
-                    # Validate on all datasets
-                    metrics = self.model_validator.validate_model_multiple_datasets(
-                        model, validation_datasets, dataset_names, model_type, self.output_dir, k_range=test_k_range
-                    )
-                    
-                    # ADDITIONALLY perform cross-validation if requested or for small datasets
-                    should_use_cv = use_cross_validation or self._should_use_cross_validation(train_df, valid_df, test_df)
-                    
-                    if should_use_cv:
-                        print(f"   📊 Additionally performing cross-validation for {model_type}...")
-                        cv_folds = kwargs.get('cv_folds', 5)
-                        cv_metrics = self._validate_with_cross_validation(
-                            model, train_df, model_type, k_range=test_k_range, cv_folds=cv_folds
-                        )
-                        
-                        # Add cross-validation results to the metrics
-                        metrics['cross_validation'] = cv_metrics
-                        print(f"   ✅ Both multi-dataset and cross-validation completed for {model_type}")
-                    
-                    # Add model selection explanation
-                    if hasattr(model, '_automl_metadata'):
-                        metadata = model._automl_metadata
-                        print(f"   📊 Model Selection Summary:")
-                        print(f"      • Tested k values: {metadata['k_range_tested']}")
-                        print(f"      • Best k chosen: {metadata['best_k']}")
-                        print(f"      • Best silhouette score: {metadata['best_score']:.4f}")
-                        print(f"      • Reason: Highest silhouette score among {len(metadata['all_results'])} tested models")
-                        
-                        # Add detailed results to metrics
-                        metrics['k_selection_details'] = {
-                            'k_range_tested': metadata['k_range_tested'],
-                            'best_k': metadata['best_k'],
-                            'best_score': metadata['best_score'],
-                            'all_k_results': [
-                                {'k': r['k'], 'silhouette_score': r['silhouette_score']} 
-                                for r in metadata['all_results']
-                            ]
-                        }
-                    
-                    # Add tuning information to metrics
-                    metrics.update({
-                        'hyperparameter_tuning': tuning_result,
-                        'optimization_method': tuning_result.get('optimization_method', 'default'),
-                        'n_trials': tuning_result.get('n_trials', 0)
-                    })
-                    
-                    trained_models[model_type] = {
-                        'model': model,
-                        'metrics': metrics
-                    }
-                    
-                    print(f"✅ {model_type} model completed")
-                    
+                        print(f"ℹ️ {dataset_name} already persisted")
                 except Exception as e:
-                    print(f"❌ Error training {model_type}: {str(e)}")
-                    print(f"   🐛 Full error details:")
-                    import traceback
-                    traceback.print_exc()
-                    continue
+                    print(f"⚠️ Could not persist {dataset_name}: {e}")
+        
+        try:
+            # Train clustering models
+            print("\n🤖 Building clustering models...")
+            print(f"   📋 Models configuration: {models_config}")
+            
+            enabled_models = [name for name, enabled in models_config.items() if enabled]
+            print(f"   ✅ Enabled models: {enabled_models}")
+            
+            if not enabled_models:
+                print("   ❌ No models are enabled in configuration!")
+                raise RuntimeError("No clustering models are enabled in configuration")
+            
+            trained_models = {}
+            
+            for model_name, should_run in models_config.items():
+                print(f"   🔍 Checking model: {model_name} = {should_run}")
+                if should_run:
+                    model_type = model_name.replace('run_', '')
+                    try:
+                        print(f"\n🔧 Training {model_type} model on training data...")
+                        
+                        # Tune hyperparameters on training data only
+                        # Merge clustering config with advanced params (contains Streamlit optuna_trials setting)
+                        clustering_config = self.config.get('clustering', {}).copy()
+                        
+                        # Advanced params are flattened into kwargs by background_job_manager
+                        hp_settings = {k: v for k, v in kwargs.items() 
+                                     if k in ['optuna_trials', 'optuna_timeout', 'random_trials', 'hp_method', 'enable_hyperparameter_tuning'] and v is not None}
+                        if hp_settings:
+                            if 'hyperparameter_tuning' not in clustering_config:
+                                clustering_config['hyperparameter_tuning'] = {}
+                            clustering_config['hyperparameter_tuning'].update(hp_settings)
+                            print(f"   📋 Using Streamlit hyperparameter settings: {hp_settings}")
+                        
+                        # Extract clustering hyperparameter ranges from advanced_params (passed via kwargs)
+                        clustering_hp_ranges = kwargs.get('clustering_hp_ranges', {})
+                        if clustering_hp_ranges:
+                            clustering_config['clustering_hp_ranges'] = clustering_hp_ranges
+                            print(f"   📋 Using Streamlit clustering hyperparameter ranges: {clustering_hp_ranges}")
+                        
+                        # Tune hyperparameters
+                        tuning_result = self.hyperparameter_tuner.tune_hyperparameters(
+                            model_type, train_df, clustering_config, k_range
+                        )
+                    
+                        # Always test all k values to enable proper elbow plot generation
+                        test_k_range = k_range or [2, 3, 4, 5]
+                
+                        if tuning_result.get('best_params'):
+                            print(f"   🎯 Using optimized parameters: {tuning_result['best_params']}")
+                            # Still test all k values but with optimized other parameters
+                            other_params = {k: v for k, v in tuning_result['best_params'].items() if k != 'k'}
+                            model = self.model_builder.build_model(
+                                train_df, 'features', model_type, 
+                                k_range=test_k_range,
+                                use_elbow_method=self.use_elbow_method,
+                                **other_params
+                            )
+                        else:
+                            # Build model with default parameters, testing all k values
+                            model = self.model_builder.build_model(
+                                train_df, 'features', model_type, 
+                                k_range=test_k_range,
+                                use_elbow_method=self.use_elbow_method
+                            )
+                        
+                        # ALWAYS perform multi-dataset validation when datasets are available
+                        print(f"   📊 Validating {model_type} model on different datasets...")
+                        
+                        # Prepare datasets for validation
+                        validation_datasets = [train_df]
+                        dataset_names = ['train']
+                        
+                        if valid_df is not None:
+                            validation_datasets.append(valid_df)
+                            dataset_names.append('validation')
+                            
+                        if test_df is not None:
+                            validation_datasets.append(test_df)
+                            dataset_names.append('test')
+                            
+                        if oot1_df is not None:
+                            validation_datasets.append(oot1_df)
+                            dataset_names.append('oot1')
+                            
+                        if oot2_df is not None:
+                            validation_datasets.append(oot2_df)
+                            dataset_names.append('oot2')
+                        
+                        # Validate on all datasets
+                        metrics = self.model_validator.validate_model_multiple_datasets(
+                            model, validation_datasets, dataset_names, model_type, self.output_dir, k_range=test_k_range
+                        )
+                        
+                        # ADDITIONALLY perform cross-validation if requested or for small datasets
+                        should_use_cv = use_cross_validation or self._should_use_cross_validation(train_df, valid_df, test_df)
+                        
+                        if should_use_cv:
+                            print(f"   📊 Additionally performing cross-validation for {model_type}...")
+                            cv_folds = kwargs.get('cv_folds', 5)
+                            cv_metrics = self._validate_with_cross_validation(
+                                model, train_df, model_type, k_range=test_k_range, cv_folds=cv_folds
+                            )
+                            
+                            # Add cross-validation results to the metrics
+                            metrics['cross_validation'] = cv_metrics
+                            print(f"   ✅ Both multi-dataset and cross-validation completed for {model_type}")
+                        
+                        # Add model selection explanation
+                        if hasattr(model, '_automl_metadata'):
+                            metadata = model._automl_metadata
+                            print(f"   📊 Model Selection Summary:")
+                            
+                            # Safely access metadata fields with defaults
+                            k_range_tested = metadata.get('k_range_tested', 'N/A')
+                            best_k = metadata.get('best_k', 'N/A')
+                            best_score = metadata.get('best_score', 0.0)
+                            all_results = metadata.get('all_results', [])
+                            
+                            print(f"      • Tested k values: {k_range_tested}")
+                            print(f"      • Best k chosen: {best_k}")
+                            print(f"      • Best silhouette score: {best_score:.4f}")
+                            print(f"      • Reason: Highest silhouette score among {len(all_results)} tested models")
+                            
+                            # Add detailed results to metrics
+                            metrics['k_selection_details'] = {
+                                'k_range_tested': k_range_tested,
+                                'best_k': best_k,
+                                'best_score': best_score,
+                                'all_k_results': [
+                                    {'k': r.get('k', 'N/A'), 'silhouette_score': r.get('silhouette_score', 0.0)} 
+                                    for r in all_results
+                                ]
+                            }
+                        
+                        # Add tuning information to metrics
+                        metrics.update({
+                            'hyperparameter_tuning': tuning_result,
+                            'optimization_method': tuning_result.get('optimization_method', 'default'),
+                            'n_trials': tuning_result.get('n_trials', 0)
+                        })
+                        
+                        trained_models[model_type] = {
+                            'model': model,
+                            'metrics': metrics
+                        }
+                        
+                        print(f"✅ {model_type} model completed")
+                    
+                    except Exception as e:
+                        print(f"❌ Error training {model_type}: {str(e)}")
+                        print(f"   🐛 Full error details:")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+        
+        finally:
+            # 🧹 CLEANUP: Unpersist all datasets after ALL models are complete
+            print("🧹 Unpersisting all datasets after all clustering models completed...")
+            for dataset_name, dataset in datasets_to_unpersist:
+                try:
+                    if dataset.is_cached:
+                        dataset.unpersist()
+                        print(f"🧹 {dataset_name} unpersisted")
+                except Exception as e:
+                    print(f"⚠️ Could not unpersist {dataset_name}: {e}")
         
         if not trained_models:
             raise RuntimeError("No clustering models were trained successfully")
@@ -1149,9 +1105,12 @@ class AutoMLClusterer:
             
             if hasattr(model, '_automl_metadata'):
                 metadata = model._automl_metadata
-                print(f"      • Best k: {metadata['best_k']}")
-                print(f"      • Silhouette Score: {metadata['best_score']:.4f}")
-                print(f"      • Tested k values: {metadata['k_range_tested']}")
+                if 'best_k' in metadata:
+                    print(f"      • Best k: {metadata['best_k']}")
+                if 'best_score' in metadata:
+                    print(f"      • Silhouette Score: {metadata['best_score']:.4f}")
+                if 'k_range_tested' in metadata:
+                    print(f"      • Tested k values: {metadata['k_range_tested']}")
             
             # Show other metrics if available
             if 'silhouette_score' in metrics:
@@ -1161,9 +1120,12 @@ class AutoMLClusterer:
         if hasattr(self.best_model, '_automl_metadata'):
             best_metadata = self.best_model._automl_metadata
             print(f"\n🎯 Selection Rationale:")
-            print(f"   • {self.best_model_type} achieved the highest silhouette score ({best_metadata['best_score']:.4f})")
-            print(f"   • Optimal number of clusters: {best_metadata['best_k']}")
-            print(f"   • This was determined by testing k = {best_metadata['k_range_tested']}")
+            if 'best_score' in best_metadata:
+                print(f"   • {self.best_model_type} achieved the highest silhouette score ({best_metadata['best_score']:.4f})")
+            if 'best_k' in best_metadata:
+                print(f"   • Optimal number of clusters: {best_metadata['best_k']}")
+            if 'k_range_tested' in best_metadata:
+                print(f"   • This was determined by testing k = {best_metadata['k_range_tested']}")
             print(f"   • Elbow plots and detailed analysis available in output directory")
         
         # Generate scoring scripts for ALL trained models
@@ -1191,7 +1153,6 @@ class AutoMLClusterer:
         if self.best_model is not None and self.best_model_type is not None:
             try:
                 import sys
-                import os
                 # Add the parent directory to the path for absolute import
                 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 from explainability import compute_shap_values
@@ -1715,7 +1676,6 @@ class AutoMLClusterer:
             print("⚠️ No output path set - skipping profiling save")
             return
         
-        import os
         import json
         import pandas as pd
         
@@ -1838,8 +1798,6 @@ class AutoMLClusterer:
     
     def _create_profiling_report(self, profiling_results):
         """Create a human-readable profiling report."""
-        
-        import os
         
         report_path = os.path.join(self.output_dir, 'cluster_profiling_report.txt') # Changed from self.output_path to self.output_dir
         

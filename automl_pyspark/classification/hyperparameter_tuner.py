@@ -138,6 +138,19 @@ class HyperparameterTuner:
                 print(f"❌ No best score found for {model_type}.")
                 return {}
             
+            # Additional validation for neural networks
+            if model_type.lower() == 'neural_network':
+                if not result['best_params'] or len(result['best_params']) == 0:
+                    print(f"❌ Neural network optimization returned empty parameters.")
+                    return {}
+                
+                # Validate that layers parameter exists and is valid
+                if 'layers' not in result['best_params']:
+                    print(f"❌ Neural network optimization missing 'layers' parameter.")
+                    return {}
+                
+                print(f"✅ Neural network optimization validation passed")
+            
             print(f"✅ Hyperparameter optimization completed for {model_type}")
             print(f"   Best score: {result['best_score']:.4f}")
             print(f"   Best parameters: {result['best_params']}")
@@ -169,25 +182,25 @@ class HyperparameterTuner:
                 'elasticNetParam': [0.0, 0.25, 0.5, 0.75, 1.0]
             },
             'random_forest': {
-                'numTrees': [10, 20, 50, 100],
-                'maxDepth': [3, 5, 10, 15, 20],
-                'minInstancesPerNode': [1, 2, 5, 10]
+                'numTrees': [5, 10],            # Further reduced from [10, 20]
+                'maxDepth': [3, 5],              # Further reduced from [3, 5]
+                'minInstancesPerNode': [1, 2]    # Further reduced from [1, 2]
             },
             'decision_tree': {
-                'maxDepth': [3, 5, 10, 15, 20],
-                'minInstancesPerNode': [1, 2, 5, 10],
-                'minInfoGain': [0.0, 0.01, 0.1]
+                'maxDepth': [3, 5],              # Further reduced from [3, 5, 10]
+                'minInstancesPerNode': [1, 2],   # Further reduced from [1, 2, 5]
+                'minInfoGain': [0.0, 0.01]       # Further reduced from [0.0, 0.01, 0.1]
             },
             'gradient_boosting': {
-                'maxIter': [10, 20, 50, 100],
-                'maxDepth': [3, 5, 10, 15],
-                'stepSize': [0.1, 0.2, 0.3]
+                'maxIter': [5, 10],       # Further reduced from [10, 20]
+                'maxDepth': [3, 5],       # Further reduced from [3, 5]
+                'stepSize': [0.1]         # Further reduced from [0.1, 0.2]
             },
             'naive_bayes': {
                 'smoothing': [0.1, 0.5, 1.0, 2.0]
             },
-            'multilayer_perceptron': {
-                'layers': [[10], [20], [10, 10], [20, 20], [10, 10, 10]],
+            'neural_network': {
+                'layers': [[8], [16], [8, 4], [16, 8], [16, 8, 4]],  # Hidden layers only - must be <= input size
                 'maxIter': [50, 100, 200],
                 'blockSize': [32, 64, 128]
             },
@@ -196,23 +209,23 @@ class HyperparameterTuner:
                 'regParam': [0.01, 0.1, 0.5, 1.0]
             },
             'xgboost': {
-                'maxDepth': [3, 4, 5, 6, 7, 8, 9, 10, 12, 15],
-                'numRound': [30, 50, 75, 100, 125, 150, 175, 200, 250, 300],
-                'eta': [0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3],
-                'subsample': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                'colsampleBytree': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                'minChildWeight': [1, 2, 3, 5, 7, 10],
-                'gamma': [0, 0.1, 0.2, 0.3, 0.5, 1.0]
+                'maxDepth': [3, 5],              # Further reduced from [3, 5, 7]
+                'numRound': [20, 30],            # Further reduced from [30, 50, 75]
+                'eta': [0.01, 0.1],             # Further reduced from [0.01, 0.05, 0.1]
+                'subsample': [0.8, 1.0],        # Further reduced from [0.7, 0.8, 1.0]
+                'colsampleBytree': [0.8, 1.0],  # Further reduced from [0.7, 0.8, 1.0]
+                'minChildWeight': [1, 3],       # Further reduced from [1, 3, 5]
+                'gamma': [0, 0.1]               # Further reduced from [0, 0.1, 0.3]
             },
             'lightgbm': {
-                'numLeaves': [5, 10, 15, 20, 25, 31, 40, 50, 60, 80, 100, 120],
-                'numIterations': [30, 50, 75, 100, 125, 150, 175, 200, 250, 300],
-                'learningRate': [0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3],
-                'featureFraction': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                'baggingFraction': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                'minDataInLeaf': [10, 20, 30, 50, 100],
-                'lambdaL1': [0, 0.1, 0.5, 1.0, 2.0, 5.0],
-                'lambdaL2': [0, 0.1, 0.5, 1.0, 2.0, 5.0]
+                'numLeaves': [5, 15],            # Further reduced from [5, 15, 31]
+                'numIterations': [20, 30],       # Further reduced from [30, 50, 75]
+                'learningRate': [0.01, 0.1],     # Further reduced from [0.01, 0.05, 0.1]
+                'featureFraction': [0.8, 1.0],   # Further reduced from [0.7, 0.8, 1.0]
+                'baggingFraction': [0.8, 1.0],   # Further reduced from [0.7, 0.8, 1.0]
+                'minDataInLeaf': [10, 20],       # Further reduced from [10, 30, 50]
+                'lambdaL1': [0, 0.5],           # Further reduced from [0, 0.5, 1.0]
+                'lambdaL2': [0, 0.5]            # Further reduced from [0, 0.5, 1.0]
             }
         }
         
@@ -264,7 +277,14 @@ class HyperparameterTuner:
                     params[param_name] = random.choice(param_values)
                 
                 # Create a hash of the parameter combination
-                param_hash = tuple(sorted(params.items()))
+                # Convert lists to tuples for hashing
+                hashable_params = {}
+                for key, value in params.items():
+                    if isinstance(value, list):
+                        hashable_params[key] = tuple(value)
+                    else:
+                        hashable_params[key] = value
+                param_hash = tuple(sorted(hashable_params.items()))
                 
                 if param_hash not in used_combinations:
                     used_combinations.add(param_hash)
@@ -308,6 +328,17 @@ class HyperparameterTuner:
         successful_trials = 0
         
         start_time = time.time()
+        trial_count = 0
+        
+        # Add global timeout protection for tree-based models
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            max_optimization_time = 180  # 3 minutes max for tree-based models
+            print(f"   ⏰ Global timeout set to {max_optimization_time}s for tree-based model")
+        
+        # Generate diverse parameter combinations
+        diverse_params = self._ensure_diverse_parameters(model_type, n_trials)
+        print(f"🎲 Generated {len(diverse_params)} diverse parameter combinations")
         
         # Chunk trials to reduce memory pressure and broadcasting warnings
         chunk_size = 5  # Process 5 trials at a time
@@ -316,18 +347,15 @@ class HyperparameterTuner:
         print(f"📊 Processing {n_trials} trials in {len(trial_chunks)} chunks of {chunk_size} trials each")
         print(f"🔍 Parameter space for {model_type}: {param_space}")
         
-        # Generate diverse parameter combinations upfront
-        diverse_params = self._ensure_diverse_parameters(model_type, n_trials)
-        print(f"🎲 Generated {len(diverse_params)} diverse parameter combinations")
-        
-        for chunk_idx, trial_chunk in enumerate(trial_chunks):
-            print(f"🔄 Processing chunk {chunk_idx + 1}/{len(trial_chunks)} (trials {trial_chunk[0] + 1}-{trial_chunk[-1] + 1})")
+        for chunk_idx, trial_indices in enumerate(trial_chunks):
+            print(f"🔄 Processing chunk {chunk_idx + 1}/{len(trial_chunks)} (trials {trial_indices[0] + 1}-{trial_indices[-1] + 1})")
             
             chunk_results = []
             
-            for trial_idx in trial_chunk:
-                if time.time() - start_time > timeout:
-                    print(f"⏰ Random search timeout reached after {trial_idx} trials")
+            for trial_idx in trial_indices:
+                # Check global timeout
+                if time.time() - start_time > max_optimization_time:
+                    print(f"⏰ Global optimization timeout reached after {trial_idx} trials")
                     break
                     
                 try:
@@ -345,16 +373,60 @@ class HyperparameterTuner:
                     
                     print(f"    Trial {trial_idx + 1}/{n_trials}: Testing params = {params}")
                     
+                    # Force memory cleanup between trials for tree-based models
+                    if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm'] and trial_idx > 0:
+                        try:
+                            import gc
+                            gc.collect()  # Force Python garbage collection
+                            
+                            # Force Spark garbage collection
+                            if hasattr(self.spark, 'sparkContext'):
+                                self.spark.sparkContext._jvm.System.gc()
+                            
+                            # Clear Spark cache if available
+                            try:
+                                self.spark.catalog.clearCache()
+                            except:
+                                pass
+                            
+                            print(f"    🧹 Memory cleanup before trial {trial_idx + 1}")
+                            time.sleep(0.5)  # Brief pause for cleanup
+                        except Exception as e:
+                            print(f"    ⚠️ Memory cleanup failed: {e}")
+                    
                     # Create and train model
                     estimator = self._create_estimator_with_params(
-                        model_type, target_column, params, available_model_types
+                        model_type, target_column, params, available_model_types, feature_count
                     )
                     
                     if estimator is None:
                         print(f"    Trial {trial_idx + 1}: Failed to create estimator, skipping...")
                         continue
                     
-                    model = estimator.fit(train_data)
+                    # Add timeout protection for tree-based models
+                    if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                        import signal
+                        
+                        def timeout_handler(signum, frame):
+                            raise TimeoutError("Model training timed out")
+                        
+                        # Set timeout for tree-based models (30 seconds per trial)
+                        signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(30)
+                        
+                        try:
+                            model = estimator.fit(train_data)
+                            signal.alarm(0)  # Cancel timeout
+                        except TimeoutError:
+                            print(f"    ⏰ Trial {trial_idx + 1}: Model training timed out, skipping...")
+                            signal.alarm(0)  # Cancel timeout
+                            continue
+                        except Exception as e:
+                            signal.alarm(0)  # Cancel timeout
+                            raise e
+                    else:
+                        model = estimator.fit(train_data)
+                    
                     predictions = model.transform(train_data)
                     
                     # Evaluate model
@@ -369,8 +441,23 @@ class HyperparameterTuner:
                     else:
                         print(f"    Score: {score:.4f} (best: {best_score:.4f})")
                     
+                    # Check for broadcast warning escalation and terminate early if detected
+                    if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                        # If we've had 2 successful trials, stop early to prevent escalation
+                        if successful_trials >= 2:
+                            print(f"    🛑 Early termination: {successful_trials} successful trials completed for tree-based model")
+                            print(f"    💡 This prevents broadcast warning escalation")
+                            break
+                    
                 except Exception as e:
-                    print(f"    Trial {trial_idx + 1} failed: {str(e)}")
+                    error_msg = str(e).lower()
+                    if 'broadcast' in error_msg or 'connection refused' in error_msg or 'task binary' in error_msg:
+                        print(f"    ⚠️ Broadcasting error detected in trial {trial_idx + 1}: {str(e)}")
+                        print(f"    🛑 Stopping hyperparameter tuning due to broadcasting error")
+                        print(f"    💡 Consider reducing hyperparameter space or using fewer trials")
+                        break
+                    else:
+                        print(f"    Trial {trial_idx + 1} failed: {str(e)}")
                     continue
             
             # Add chunk results to overall results
@@ -536,7 +623,8 @@ class HyperparameterTuner:
 
     def _create_estimator_with_params(self, model_type: str, target_column: str, 
                                     params: Dict[str, Any], 
-                                    available_model_types: Dict[str, Any]):
+                                    available_model_types: Dict[str, Any],
+                                    feature_count: int = 16):
         """
         Create an estimator with specified parameters.
         
@@ -559,6 +647,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'random_forest':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for random forest")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             from pyspark.ml.classification import RandomForestClassifier
             return RandomForestClassifier(
                 featuresCol='features', labelCol=target_column,
@@ -568,6 +664,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'decision_tree':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for decision tree")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             from pyspark.ml.classification import DecisionTreeClassifier
             return DecisionTreeClassifier(
                 featuresCol='features', labelCol=target_column,
@@ -578,20 +682,11 @@ class HyperparameterTuner:
             
         elif model_type.lower() == 'gradient_boosting':
             # Apply gradient boosting optimisations to reduce task binary warnings
-            from pyspark.sql import SparkSession
-            spark = SparkSession.getActiveSession()
-            if spark:
-                try:
-                    import sys
-                    import os
-                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
-                    apply_gradient_boosting_optimizations(spark)
-                except Exception:
-                    # Optimisation module may not be present; ignore gracefully
-                    pass
+            try:
+                from spark_optimization_config import apply_gradient_boosting_optimizations
+                apply_gradient_boosting_optimizations(self.spark)
+            except Exception as e:
+                print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
             
             from pyspark.ml.classification import GBTClassifier
             # Limit the complexity of the estimator by enforcing smaller defaults.  This helps
@@ -605,6 +700,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'xgboost' and 'xgboost' in available_model_types:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for XGBoost")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             from xgboost.spark import SparkXGBClassifier
             # Note: SparkXGBClassifier automatically determines objective based on label data
             return SparkXGBClassifier(
@@ -622,6 +725,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'lightgbm' and 'lightgbm' in available_model_types:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for LightGBM")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             from synapse.ml.lightgbm import LightGBMClassifier
             if self.num_classes and self.num_classes > 2:
                 # Multi-class classification
@@ -653,6 +764,48 @@ class HyperparameterTuner:
                 )
             return estimator
         
+        elif model_type.lower() == 'neural_network':
+            from pyspark.ml.classification import MultilayerPerceptronClassifier
+            
+            # Apply neural network specific optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_neural_network_optimizations
+                apply_neural_network_optimizations(self.spark)
+                print(f"   ⚡ Applied neural network optimizations")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply neural network optimizations: {e}")
+            
+            # Get hidden layers from parameters
+            hidden_layers = params.get('layers', [8])
+            
+            # Validate that hidden layers are compatible with input size
+            if hidden_layers and len(hidden_layers) > 0:
+                first_hidden_size = hidden_layers[0]
+                if first_hidden_size > feature_count:
+                    print(f"   ⚠️ Neural network first hidden layer size ({first_hidden_size}) > input size ({feature_count})")
+                    print(f"   🔧 Adjusting to use compatible layer size: {feature_count}")
+                    # Adjust the first hidden layer to match input size
+                    hidden_layers[0] = feature_count
+            
+            # Build complete layer architecture: [input_size, hidden_layers..., output_size]
+            # Use the passed feature_count parameter
+            
+            # Determine output layer size
+            output_size = self.num_classes if self.num_classes and self.num_classes > 2 else 2
+            
+            # Build complete layers: [input, hidden..., output]
+            complete_layers = [feature_count] + hidden_layers + [output_size]
+            
+            print(f"   🧠 Neural network architecture: {complete_layers}")
+            
+            return MultilayerPerceptronClassifier(
+                featuresCol='features', labelCol=target_column,
+                layers=complete_layers,
+                maxIter=params.get('maxIter', 100),
+                blockSize=params.get('blockSize', 128),
+                seed=42
+            )
+        
         else:
             # Unsupported model type for optimization
             return None
@@ -682,24 +835,80 @@ class HyperparameterTuner:
         n_trials = self.config.get('optuna_trials', 50)
         timeout = self.config.get('optuna_timeout', 300)
         
+        # Reduce trials and timeout for neural networks to prevent hanging
+        if model_type.lower() == 'neural_network':
+            n_trials = min(n_trials, 20)  # Limit neural network trials
+            timeout = min(timeout, 180)   # Limit neural network timeout
+            print(f"   🧠 Neural network optimization: {n_trials} trials, {timeout}s timeout")
+        
+        # Ultra-aggressive limits for tree-based models to prevent broadcast escalation
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            n_trials = min(n_trials, 3)   # Ultra-conservative: only 3 trials max
+            timeout = min(timeout, 120)   # 2 minutes max timeout
+            print(f"   🌳 Tree-based model optimization: {n_trials} trials, {timeout}s timeout (ultra-conservative)")
+        
+        # Conservative limits for decision trees
+        if model_type.lower() == 'decision_tree':
+            n_trials = min(n_trials, 5)   # Conservative: only 5 trials max
+            timeout = min(timeout, 180)   # 3 minutes max timeout
+            print(f"   🌲 Decision tree optimization: {n_trials} trials, {timeout}s timeout (conservative)")
+        
         # Apply Spark optimizations specifically for hyperparameter tuning
         try:
-            from spark_optimization_config import optimize_for_hyperparameter_tuning
-            print(f"   ⚡ Applying Spark optimizations for {model_type} hyperparameter tuning...")
-            optimize_for_hyperparameter_tuning(self.spark, model_type, n_trials)
+            from spark_optimization_config import optimize_for_hyperparameter_tuning, optimize_for_tree_based_tuning
+            
+            # Use tree-specific optimizations for tree-based models
+            if model_type.lower() in ['random_forest', 'decision_tree', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                print(f"   ⚡ Applying tree-based optimizations for {model_type} hyperparameter tuning...")
+                optimize_for_tree_based_tuning(self.spark, model_type, n_trials)
+            else:
+                print(f"   ⚡ Applying general optimizations for {model_type} hyperparameter tuning...")
+                optimize_for_hyperparameter_tuning(self.spark, model_type, n_trials)
         except Exception as e:
             print(f"   ⚠️  Could not apply tuning optimizations: {e}")
         
         # Track trial count for cleanup
         trial_counter = {'count': 0}
         
+        # Add global timeout protection
+        optimization_start_time = time.time()
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        
         def objective(trial):
+            # Check global timeout
+            if time.time() - optimization_start_time > max_optimization_time:
+                print(f"    ⏰ Global optimization timeout reached ({max_optimization_time}s)")
+                return 0.5  # Return neutral score to stop optimization
+            
             trial_counter['count'] += 1
             current_trial = trial_counter['count']
             
             try:
+                # Force garbage collection between trials to prevent memory accumulation
+                if trial_counter['count'] > 1:  # Skip first trial
+                    try:
+                        import gc
+                        gc.collect()  # Force Python garbage collection
+                        
+                        # Force Spark garbage collection
+                        if hasattr(self.spark, 'sparkContext'):
+                            self.spark.sparkContext._jvm.System.gc()
+                        
+                        # Clear Spark cache if available
+                        try:
+                            self.spark.catalog.clearCache()
+                        except:
+                            pass
+                        
+                        print(f"   🧹 Memory cleanup after trial {trial_counter['count'] - 1}")
+                        
+                        # Brief pause to allow cleanup
+                        time.sleep(1)
+                    except Exception as e:
+                        print(f"   ⚠️ Memory cleanup failed: {e}")
+                
                 # Define hyperparameter search spaces for each model type
-                estimator = self._create_optimized_estimator(trial, model_type, target_column, available_model_types)
+                estimator = self._create_optimized_estimator(trial, model_type, target_column, available_model_types, feature_count)
                 
                 if estimator is None:
                     return 0.5  # Return default score for unsupported models
@@ -708,36 +917,28 @@ class HyperparameterTuner:
                 model = estimator.fit(train_data)
                 predictions = model.transform(train_data)
                 
-                # Calculate metric based on problem type
-                metric = self._evaluate_model(predictions, target_column)
+                # Evaluate model
+                score = self._evaluate_model(predictions, target_column)
                 
-                # Enhanced cleanup every 3 trials for tree-based models, 5 for others
-                cleanup_interval = 3 if model_type in ['gradient_boosting', 'random_forest', 'xgboost', 'lightgbm'] else 5
+                # Check for broadcast warning escalation and terminate early if detected
+                if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                    # If we've had 2 successful trials, stop early to prevent escalation
+                    if trial_counter['count'] >= 2:
+                        print(f"    🛑 Early termination: {trial_counter['count']} successful trials completed for tree-based model")
+                        print(f"    💡 This prevents broadcast warning escalation")
+                        return 0.5  # Return neutral score to stop optimization
                 
-                if current_trial % cleanup_interval == 0:
-                    try:
-                        # Force garbage collection hint to Spark
-                        if hasattr(self.spark, 'sparkContext'):
-                            self.spark.sparkContext._jvm.System.gc()
-                        
-                        # Additional cleanup for tree-based models
-                        if model_type in ['gradient_boosting', 'random_forest', 'xgboost', 'lightgbm']:
-                            # Clear any cached DataFrames
-                            train_data.unpersist()
-                            predictions.unpersist()
-                            import gc
-                            gc.collect()
-                            time.sleep(1.5)  # Longer pause for tree models
-                        
-                        print(f"   🧹 Enhanced cleanup after trial {current_trial} (interval: {cleanup_interval})")
-                        time.sleep(1)  # Brief pause for GC
-                    except:
-                        pass
-                
-                return metric
+                return score
                 
             except Exception as e:
-                print(f"    Trial {current_trial} failed: {str(e)}")
+                print(f"   ❌ Trial {current_trial} failed for {model_type}: {str(e)}")
+                
+                # Special handling for neural network failures
+                if model_type.lower() == 'neural_network':
+                    print(f"   🧠 Neural network trial failed - this is common due to layer architecture issues")
+                    # Return a very low score instead of 0 to avoid Optuna getting stuck
+                    return 0.1
+                
                 return 0.0  # Return poor score for failed trials
         
         # Run Optuna optimization
@@ -767,7 +968,8 @@ class HyperparameterTuner:
         }
     
     def _create_optimized_estimator(self, trial, model_type: str, target_column: str, 
-                                   available_model_types: Dict[str, Any]):
+                                   available_model_types: Dict[str, Any],
+                                   feature_count: int = 16):
         """
         Create an estimator with optimized hyperparameters for a given trial.
         
@@ -792,6 +994,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'random_forest':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for Optuna random forest")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             num_trees = trial.suggest_int('numTrees', 10, 100)
             max_depth = trial.suggest_int('maxDepth', 3, 20)
             min_instances_per_node = trial.suggest_int('minInstancesPerNode', 1, 10)
@@ -804,6 +1014,14 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'decision_tree':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for Optuna decision tree")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             max_depth = trial.suggest_int('maxDepth', 3, 20)
             min_instances_per_node = trial.suggest_int('minInstancesPerNode', 1, 10)
             max_bins = trial.suggest_int('maxBins', 16, 64)
@@ -818,18 +1036,11 @@ class HyperparameterTuner:
         elif model_type.lower() == 'gradient_boosting':
             # Apply gradient boosting optimisations to reduce task binary warnings
             from pyspark.sql import SparkSession
-            spark = SparkSession.getActiveSession()
-            if spark:
-                try:
-                    import sys
-                    import os
-                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
-                    apply_gradient_boosting_optimizations(spark)
-                except Exception:
-                    pass
+            try:
+                from spark_optimization_config import apply_gradient_boosting_optimizations
+                apply_gradient_boosting_optimizations(self.spark)
+            except Exception as e:
+                print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
             
             # Restrict the search space for gradient boosting hyperparameters.  Smaller ranges
             # reduce the size of broadcasted task binaries and improve stability during tuning.
@@ -846,8 +1057,16 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'xgboost' and 'xgboost' in available_model_types:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for Optuna XGBoost")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             max_depth = trial.suggest_int('maxDepth', 3, 15)
-            num_round = trial.suggest_int('numRound', 30, 300)
+            num_round = trial.suggest_int('numRound', 20, 300)
             learning_rate = trial.suggest_float('eta', 0.01, 0.3, log=True)
             subsample = trial.suggest_float('subsample', 0.5, 1.0)
             colsample_bytree = trial.suggest_float('colsampleBytree', 0.5, 1.0)
@@ -871,8 +1090,16 @@ class HyperparameterTuner:
             )
             
         elif model_type.lower() == 'lightgbm' and 'lightgbm' in available_model_types:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for Optuna LightGBM")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             num_leaves = trial.suggest_int('numLeaves', 5, 120)
-            num_iterations = trial.suggest_int('numIterations', 30, 300)
+            num_iterations = trial.suggest_int('numIterations', 20, 300)
             learning_rate = trial.suggest_float('learningRate', 0.01, 0.3, log=True)
             feature_fraction = trial.suggest_float('featureFraction', 0.5, 1.0)
             bagging_fraction = trial.suggest_float('baggingFraction', 0.5, 1.0)
@@ -901,6 +1128,55 @@ class HyperparameterTuner:
                     minDataInLeaf=min_data_in_leaf, lambdaL1=lambda_l1, lambdaL2=lambda_l2
                 )
             return estimator
+            
+        elif model_type.lower() == 'neural_network':
+            # Apply neural network specific optimizations
+            try:
+                from spark_optimization_config import apply_neural_network_optimizations
+                apply_neural_network_optimizations(self.spark)
+                print(f"   ⚡ Applied neural network optimizations for Optuna")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply neural network optimizations: {e}")
+            
+            # Get parameter space for neural network
+            param_space = self._get_parameter_space('neural_network')
+            
+            # Suggest hidden layers from predefined options
+            if 'layers' in param_space and param_space['layers']:
+                hidden_layers = trial.suggest_categorical('layers', param_space['layers'])
+            else:
+                # Fallback to simple hidden layers if no predefined options
+                hidden_layers = [8]  # Reduced from [16, 8] to be compatible with smaller feature counts
+            
+            # Validate that hidden layers are compatible with input size
+            if hidden_layers and len(hidden_layers) > 0:
+                first_hidden_size = hidden_layers[0]
+                if first_hidden_size > feature_count:
+                    print(f"   ⚠️ Optuna neural network first hidden layer size ({first_hidden_size}) > input size ({feature_count})")
+                    print(f"   🔧 Adjusting to use compatible layer size: {feature_count}")
+                    # Adjust the first hidden layer to match input size
+                    hidden_layers[0] = feature_count
+            
+            # Suggest other parameters
+            max_iter = trial.suggest_categorical('maxIter', param_space.get('maxIter', [50, 100, 200]))
+            block_size = trial.suggest_categorical('blockSize', param_space.get('blockSize', [32, 64, 128]))
+            
+            # Build complete layer architecture: [input_size, hidden_layers..., output_size]
+            # Use the passed feature_count parameter
+            
+            # Determine output layer size
+            output_size = self.num_classes if self.num_classes and self.num_classes > 2 else 2
+            
+            # Build complete layers: [input, hidden..., output]
+            complete_layers = [feature_count] + hidden_layers + [output_size]
+            
+            print(f"   🧠 Optuna neural network architecture: {complete_layers}")
+            
+            from pyspark.ml.classification import MultilayerPerceptronClassifier
+            return MultilayerPerceptronClassifier(
+                featuresCol='features', labelCol=target_column,
+                layers=complete_layers, maxIter=max_iter, blockSize=block_size, seed=42
+            )
         
         else:
             # Unsupported model type for optimization
@@ -944,7 +1220,7 @@ class HyperparameterTuner:
         info = {
             'available_methods': ['optuna', 'random_search', 'grid_search'],
             'optuna_available': OPTUNA_AVAILABLE,
-            'supported_models': ['logistic', 'random_forest', 'decision_tree', 'gradient_boosting'],
+            'supported_models': ['logistic', 'random_forest', 'decision_tree', 'gradient_boosting', 'neural_network'],
             'default_config': {
                 'optuna_trials': self.config.get('optuna_trials', 50),
                 'optuna_timeout': self.config.get('optuna_timeout', 300),

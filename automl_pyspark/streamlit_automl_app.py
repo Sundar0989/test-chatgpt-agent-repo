@@ -285,13 +285,20 @@ if not os.path.exists(RESULTS_DIR):
         pass  # Could not create results directory
 
 def load_config():
-    """Load the YAML configuration file."""
+    """Load the YAML configuration file using ConfigManager to handle auto-detection."""
     try:
-        with open(CONFIG_FILE, 'r') as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        st.error(f"Configuration file {CONFIG_FILE} not found!")
-        return {}
+        from config_manager import ConfigManager
+        config_manager = ConfigManager(CONFIG_FILE)
+        return config_manager.get_config()
+    except Exception as e:
+        st.error(f"Error loading configuration: {e}")
+        # Fallback to simple YAML loading
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            st.error(f"Configuration file {CONFIG_FILE} not found!")
+            return {}
 
 def clean_config_for_json(config: Dict) -> Dict:
     """Clean configuration to remove non-JSON-serializable objects."""
@@ -779,13 +786,263 @@ def render_enhanced_upload_section():
             "options": {}
         }
 
+def build_bigquery_query(table_ref: str, options: dict = None, is_view: bool = False) -> str:
+    """
+    Build a BigQuery query with user configurations.
+    
+    Args:
+        table_ref: BigQuery table reference (project.dataset.table or dataset.table)
+        options: Dictionary containing query options like WHERE clauses, column selection, etc.
+        is_view: Whether the table reference is a view (optional, will be auto-detected if not provided)
+        
+    Returns:
+        str: Configured SQL query
+    """
+    if not options:
+        options = {}
+    
+    # Start building the query
+    select_clause = options.get('select_columns', '*')
+    if select_clause and select_clause.strip():
+        select_part = select_clause.strip()
+    else:
+        select_part = '*'
+    
+    # Build the FROM clause with sampling if specified
+    from_part = f"`{table_ref}`"
+    sampling_where = ""
+    
+    if options.get('sample_percent'):
+        sample_percent = options['sample_percent']
+        if is_view:
+            # For views, use RAND() function for sampling
+            sampling_where = f"AND RAND() < {sample_percent / 100.0}"
+        else:
+            # For tables, use TABLESAMPLE SYSTEM
+            from_part += f" TABLESAMPLE SYSTEM ({sample_percent} PERCENT)"
+    
+    # Build the WHERE clause if specified
+    where_part = ""
+    if options.get('where_clause') and options['where_clause'].strip():
+        where_part = f"WHERE {options['where_clause'].strip()}"
+        if sampling_where:
+            where_part += f" {sampling_where}"
+    elif sampling_where:
+        # If no WHERE clause but we have sampling, create one
+        where_part = f"WHERE {sampling_where.strip('AND ')}"
+    
+    # Build the LIMIT clause if specified
+    limit_part = ""
+    if options.get('row_limit'):
+        limit_part = f"LIMIT {options['row_limit']}"
+    
+    # Construct the final query
+    query_parts = [f"SELECT {select_part}", f"FROM {from_part}"]
+    
+    if where_part:
+        query_parts.append(where_part)
+    
+    if limit_part:
+        query_parts.append(limit_part)
+    
+    return " ".join(query_parts)
+
+def check_bigquery_table_size(table_ref: str, project_id: str = None, max_size_gb: float = 10.0, options: dict = None) -> tuple[bool, float, str]:
+    """
+    Check BigQuery table/view size before loading data using dry run.
+    
+    Args:
+        table_ref: BigQuery table reference (project.dataset.table or dataset.table)
+        project_id: GCP project ID (optional, will be extracted from table_ref if not provided)
+        max_size_gb: Maximum allowed table size in GB
+        options: Dictionary containing query options like WHERE clauses, column selection, etc.
+        
+    Returns:
+        tuple: (is_allowed, size_gb, error_message)
+    """
+    try:
+        from google.cloud import bigquery
+        
+        # Check if GCP authentication is available
+        try:
+            # Try to initialize the BigQuery client
+            client = bigquery.Client()
+        except Exception as auth_error:
+            # If authentication fails, return a helpful error message
+            if "key.json was not found" in str(auth_error) or "credentials" in str(auth_error).lower():
+                return False, 0.0, "GCP authentication not configured. Please run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+            else:
+                return False, 0.0, f"GCP authentication error: {str(auth_error)}"
+        
+        # Extract project_id from table_ref if not provided
+        if not project_id:
+            table_parts = table_ref.split('.')
+            if len(table_parts) >= 3:
+                project_id = table_parts[0]
+            else:
+                return False, 0.0, "Could not extract project ID from table reference"
+        
+        # Create a dry-run query job to get the actual bytes that would be processed
+        # This approach works for both tables and views, and gives us the actual bytes
+        # that would be processed when querying the table/view
+        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+        
+        # Build the query with user configurations if provided
+        if options:
+            # First, try to detect if this is a view
+            is_view = False
+            try:
+                # Extract project_id from table_ref if needed
+                table_parts = table_ref.split('.')
+                if len(table_parts) >= 3:
+                    check_project_id = table_parts[0]
+                    dataset_id = table_parts[1]
+                    table_id = table_parts[2]
+                else:
+                    # Use default project
+                    check_project_id = client.project
+                    dataset_id = table_parts[0]
+                    table_id = table_parts[1]
+                
+                # Try to get table info
+                table_ref_obj = client.dataset(dataset_id, project=check_project_id).table(table_id)
+                table = client.get_table(table_ref_obj)
+                is_view = table.table_type == 'VIEW'
+            except Exception:
+                # If we can't determine if it's a view, assume it's a table
+                is_view = False
+            
+            # Build the query
+            query = build_bigquery_query(table_ref, options, is_view)
+        else:
+            # Create a simple SELECT query to check the table/view
+            query = f"SELECT * FROM `{table_ref}`"
+        
+        # Run the dry run (this doesn't actually execute the query, just estimates the bytes)
+        sampling_removed = False
+        try:
+            query_job = client.query(query, job_config=job_config)
+        except Exception as e:
+            # If the query failed due to TABLESAMPLE on view, try without sampling
+            if "TABLESAMPLE SYSTEM can only be applied directly to base tables" in str(e) and options and options.get('sample_percent'):
+                # Remove sampling from options and try again
+                options_without_sampling = options.copy()
+                if 'sample_percent' in options_without_sampling:
+                    del options_without_sampling['sample_percent']
+                    sampling_removed = True
+                query = build_bigquery_query(table_ref, options_without_sampling, True)  # Force view mode
+                query_job = client.query(query, job_config=job_config)
+            else:
+                # Re-raise the error if it's not related to TABLESAMPLE
+                raise e
+        
+        # Get the processed bytes from the dry run
+        bytes_processed = query_job.total_bytes_processed
+        
+        # Convert to GB
+        size_gb = bytes_processed / (1024**3)
+        
+        # If we have user configurations, run the actual configured query to get accurate size
+        if options:
+            try:
+                # Build the actual query with user configurations
+                actual_query = build_bigquery_query(table_ref, options, is_view)
+                
+                # Run dry run with the actual configured query
+                actual_job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+                actual_query_job = client.query(actual_query, actual_job_config)
+                actual_bytes_processed = actual_query_job.total_bytes_processed
+                actual_size_gb = actual_bytes_processed / (1024**3)
+                
+                # Use the actual configured query size instead of hardcoded estimates
+                size_gb = actual_size_gb
+                
+                # Log for debugging
+                print(f"Original query size: {bytes_processed / (1024**3):.2f} GB")
+                print(f"Configured query: {actual_query}")
+                print(f"Configured query size: {actual_size_gb:.2f} GB")
+                
+            except Exception as e:
+                print(f"Error running configured query dry run: {e}")
+                # If configured query fails, keep the original estimate
+                print("Keeping original table size estimate")
+                # size_gb remains as the original estimate
+        
+        # Check if size is within limits
+        is_allowed = size_gb <= max_size_gb
+        
+        # Create error message if sampling was removed
+        error_msg = ""
+        if sampling_removed:
+            error_msg = "Table sampling was automatically disabled because this is a view (TABLESAMPLE only works on base tables)."
+        
+        return is_allowed, size_gb, error_msg
+        
+    except ImportError:
+        return False, 0.0, "google-cloud-bigquery package not installed. Please install it with: pip install google-cloud-bigquery"
+    except Exception as e:
+        # Check if this is an authentication error
+        if "key.json was not found" in str(e) or "credentials" in str(e).lower():
+            return False, 0.0, "GCP authentication not configured. Please run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+        else:
+            return False, 0.0, f"Error checking table size: {str(e)}"
+
 def render_bigquery_section():
     """Render the enhanced BigQuery data source section with proven working configuration."""
     st.subheader("🔗 GCP BigQuery Direct Integration")
     
-    st.success("✅ **BigQuery integration enabled with proven working configuration!**")
-    st.info("💡 Connect directly to BigQuery tables without downloading data locally - supports datasets of any size")
+    # Check if BigQuery is available and authenticated
+    try:
+        from google.cloud import bigquery
+        try:
+            # Test authentication
+            client = bigquery.Client()
+            st.success("✅ **BigQuery integration enabled with proven working configuration!**")
+            st.info("💡 Connect directly to BigQuery tables without downloading data locally - supports datasets of any size")
+        except Exception as auth_error:
+            if "key.json was not found" in str(auth_error) or "credentials" in str(auth_error).lower():
+                st.warning("⚠️ **BigQuery integration requires GCP authentication**")
+                st.error("❌ GCP authentication not configured")
+                st.info("🔧 **To enable BigQuery integration:**")
+                st.markdown("""
+                1. **Install gcloud CLI**: Download from [Google Cloud Console](https://cloud.google.com/sdk/docs/install)
+                2. **Authenticate**: Run `gcloud auth application-default login` in your terminal
+                3. **Set project**: Run `gcloud config set project YOUR_PROJECT_ID`
+                4. **Restart Streamlit**: Restart the application after authentication
+                """)
+                st.info("💡 **Alternative**: Use file upload or existing files instead of BigQuery")
+                return {
+                    "source_type": "bigquery", 
+                    "data_source": None,
+                    "options": {}
+                }
+            else:
+                st.error(f"❌ GCP authentication error: {str(auth_error)}")
+                return {
+                    "source_type": "bigquery", 
+                    "data_source": None,
+                    "options": {}
+                }
+    except ImportError:
+        st.warning("⚠️ **BigQuery integration requires additional packages**")
+        st.error("❌ google-cloud-bigquery package not installed")
+        st.info("🔧 **To enable BigQuery integration:**")
+        st.markdown("""
+        1. **Install package**: Run `pip install google-cloud-bigquery`
+        2. **Authenticate**: Run `gcloud auth application-default login`
+        3. **Restart Streamlit**: Restart the application after installation
+        """)
+        st.info("💡 **Alternative**: Use file upload or existing files instead of BigQuery")
+        return {
+            "source_type": "bigquery", 
+            "data_source": None,
+            "options": {}
+        }
+    
     st.markdown("**Supported formats:** `project.dataset.table` or `dataset.table` (uses default project)")
+    
+    # Authentication notice
+    st.info("🔐 **Authentication Required**: BigQuery integration requires GCP authentication. If you haven't set it up, you'll see authentication errors below. Use the troubleshooting steps above to resolve.")
     
     # Method selection
     input_method = st.radio(
@@ -808,6 +1065,9 @@ def render_bigquery_section():
                 placeholder="my-gcp-project",
                 key="bq_project"
             )
+            # Clean project_id to remove any backticks
+            if project_id:
+                project_id = project_id.strip('`')
             dataset_id = st.text_input(
                 "Dataset ID", 
                 help="BigQuery dataset name",
@@ -839,11 +1099,18 @@ def render_bigquery_section():
             key="bq_full_ref"
         )
         
+        # Clean table_ref to remove any backticks
+        if table_ref:
+            table_ref = table_ref.strip('`')
+        
         # Extract project_id from full table reference if possible
         if table_ref:
             table_parts = table_ref.split('.')
             if len(table_parts) >= 3:
                 project_id = table_parts[0]  # Extract project ID from full reference
+                # Clean project_id to remove any backticks
+                if project_id:
+                    project_id = project_id.strip('`')
             # If we can't extract project_id, it stays None (already initialized)
     
     if table_ref:
@@ -859,14 +1126,17 @@ def render_bigquery_section():
         
         st.success(f"✅ Table reference: `{table_ref}`")
         
-        # Enhanced BigQuery options
+        # Enhanced BigQuery options - SHOW FIRST
         st.subheader("🔧 BigQuery Configuration")
+        
+        # General notice about large tables
+        st.info("💡 **Pro Tip:** For very large tables (>100GB), if you don't see significant size reduction after applying filters, consider creating a separate filtered table or view for more accurate estimates and better performance.")
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("**📊 Data Processing Options**")
-            st.info("💡 **No size limits** - Process datasets of any size directly from BigQuery")
+            st.info("💡 Configure your data processing options below, then check the size of your filtered data")
             
             # Quick example with user's working table
             with st.expander("📖 Example Configuration", expanded=False):
@@ -922,6 +1192,7 @@ Full reference: atus-prism-dev.ds_sandbox.sub_b2c_add_video_dataset_DNA_2504_N02
                 st.write("• Initial model development with billion+ row tables")
                 st.write("• Quick prototyping and feature exploration") 
                 st.write("• Cost optimization for development environments")
+                st.warning("⚠️ **Note:** Table sampling (TABLESAMPLE) only works on base tables, not views. For views, sampling will be automatically disabled.")
         
         with col2:
             st.markdown("**🔍 Filtering & Options**")
@@ -949,69 +1220,7 @@ Full reference: atus-prism-dev.ds_sandbox.sub_b2c_add_video_dataset_DNA_2504_N02
                 key="bq_legacy"
             )
         
-        # BigQuery connection test with working configuration
-        if st.checkbox("🔍 Test BigQuery Connection", help="Validate table access and preview schema"):
-            if table_ref:
-                with st.spinner("Testing BigQuery connection..."):
-                    try:
-                        # Use the proven working BigQuery configuration
-                        from pyspark.sql import SparkSession
-                        
-                        # Create test session with proven working config
-                        test_spark = SparkSession.builder \
-                            .appName("Streamlit BigQuery Test") \
-                            .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1") \
-                            .config("spark.driver.memory", "8g") \
-                            .getOrCreate()
-                        
-                        # Test BigQuery connection with small sample
-                        test_df = test_spark.read \
-                            .format("bigquery") \
-                            .option("parentProject", project_id or "default-project") \
-                            .option("viewsEnabled", "true") \
-                            .option("useAvroLogicalTypes", "true") \
-                            .option("table", table_ref) \
-                            .option("maxRowsPerPartition", 5) \
-                            .load()
-                        
-                        # Get basic info
-                        sample_count = test_df.count()
-                        column_count = len(test_df.columns)
-                        columns = test_df.columns
-                        
-                        # Stop test session
-                        test_spark.stop()
-                        
-                        # Show success
-                        st.success(f"✅ BigQuery connection successful!")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Sample Rows", sample_count)
-                        with col2:
-                            st.metric("Total Columns", column_count)
-                        
-                        st.write("**Available Columns:**")
-                        st.write(", ".join(columns[:10]) + ("..." if len(columns) > 10 else ""))
-                        
-                        if sample_count > 0:
-                            st.write("**Sample Data:**")
-                            sample_pandas = test_df.limit(3).toPandas()
-                            st.dataframe(sample_pandas)
-                            
-                    except Exception as e:
-                        st.error(f"❌ BigQuery connection failed: {str(e)}")
-                        st.info("💡 **Troubleshooting:**")
-                        st.markdown("""
-                        - Ensure you're authenticated with Google Cloud
-                        - Check that the table exists and you have access
-                        - Verify your project ID and table name are correct
-                        - Authentication: `gcloud auth application-default login`
-                        """)
-            else:
-                st.warning("⚠️ Please specify a BigQuery table reference first")
-        
-        # Build options dictionary
+        # Build options dictionary first (needed for summary and connection test)
         options = {}
         
         if row_limit:
@@ -1036,7 +1245,6 @@ Full reference: atus-prism-dev.ds_sandbox.sub_b2c_add_video_dataset_DNA_2504_N02
         }
         
         # Store project_id for proper BigQuery connector mapping
-        # project_id is initialized as None at function start, so it's always defined
         if project_id is not None:
             options['project_id'] = project_id
         
@@ -1062,50 +1270,288 @@ Full reference: atus-prism-dev.ds_sandbox.sub_b2c_add_video_dataset_DNA_2504_N02
             # Show what query will be generated
             if any([sample_percent, custom_where, custom_select]):
                 st.info("🔧 **Query Method:** Custom SQL query with your options")
-                st.code(f"""
-SELECT {custom_select if custom_select else '*'}
-FROM `{table_ref}`{f" TABLESAMPLE SYSTEM ({sample_percent} PERCENT)" if sample_percent else ''}
-{f"WHERE {custom_where}" if custom_where else ''}
-{f"LIMIT {row_limit}" if row_limit else ''}
-                """.strip())
+                query = build_bigquery_query(table_ref, options)
+                st.code(query)
             else:
                 st.info("🔧 **Query Method:** Direct table reference")
                 if row_limit:
                     st.code(f"Direct table load with maxRowsPerPartition={row_limit}")
                 else:
                     st.code(f"Direct table load: {table_ref}")
+        
+        # Check table/view size AFTER configuration
+        st.subheader("📊 Table/View Size Check")
+        max_size_gb = 10.0  # Configurable maximum size limit
+        
+        # Track size check result
+        size_check_passed = False
+        
+        with st.spinner("Checking BigQuery table/view size with your configurations..."):
+            is_allowed, size_gb, error_msg = check_bigquery_table_size(table_ref, project_id, max_size_gb, options)
             
-            # Show OOT dataset handling information
-            if any([custom_where, custom_select]):
-                st.info("📅 **OOT Dataset Handling:**")
-                st.write("• OOT1 and OOT2 datasets will use the **same WHERE clause and column selection** as training data")
-                st.write("• Row limiting and table sampling will **NOT** be applied to OOT datasets")
-                st.write("• This ensures consistent data filtering across all datasets")
+            if error_msg:
+                st.error(f"❌ Table/view size check failed: {error_msg}")
                 
-                if custom_where:
-                    st.write(f"   🔍 OOT WHERE clause: `{custom_where}`")
-                if custom_select:
-                    st.write(f"   📝 OOT column selection: `{custom_select}`")
+                # Provide specific guidance based on error type
+                if "GCP authentication not configured" in error_msg:
+                    st.warning("🔐 **GCP Authentication Required**")
+                    st.info("💡 **To enable BigQuery integration:**")
+                    st.markdown("""
+                    1. **Install gcloud CLI**: Download from [Google Cloud Console](https://cloud.google.com/sdk/docs/install)
+                    2. **Authenticate**: Run `gcloud auth application-default login` in your terminal
+                    3. **Set project**: Run `gcloud config set project YOUR_PROJECT_ID`
+                    4. **Restart Streamlit**: Restart the application after authentication
+                    """)
+                    st.info("💡 **Alternative**: Use file upload or existing files instead of BigQuery")
+                elif "google-cloud-bigquery package not installed" in error_msg:
+                    st.warning("📦 **Package Installation Required**")
+                    st.info("💡 **To enable BigQuery integration:**")
+                    st.markdown("""
+                    1. **Install package**: Run `pip install google-cloud-bigquery`
+                    2. **Authenticate**: Run `gcloud auth application-default login`
+                    3. **Restart Streamlit**: Restart the application after installation
+                    """)
+                    st.info("💡 **Alternative**: Use file upload or existing files instead of BigQuery")
+                else:
+                    st.info("💡 **General Troubleshooting:**")
+                    st.markdown("""
+                    - Ensure you're authenticated with Google Cloud: `gcloud auth application-default login`
+                    - Check that the table/view exists and you have access
+                    - Verify your project ID and table/view name are correct
+                    - Install BigQuery client: `pip install google-cloud-bigquery`
+                    """)
+                
+                return {
+                    "source_type": "bigquery", 
+                    "data_source": None,
+                    "options": {},
+                    "size_check_passed": False
+                }
+            
+            # Display size information
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Configured Data Size", f"{size_gb:.2f} GB")
+            with col2:
+                st.metric("Size Limit", f"{max_size_gb} GB")
+            with col3:
+                status_icon = "✅" if is_allowed else "❌"
+                status_text = "Within Limits" if is_allowed else "Exceeds Limits"
+                st.metric("Status", f"{status_icon} {status_text}")
+            
+            # Show size estimation information
+            if options and any([options.get('row_limit'), options.get('where_clause'), options.get('select_columns'), options.get('sample_percent')]):
+                st.info("📊 **Size Estimation:** Using actual BigQuery dry run with your configured query to get accurate size estimates.")
+                st.write("• This reflects the real impact of your filtering options")
+                st.write("• No hardcoded estimates - actual query analysis")
+                
+                # Check if the size is still very large despite configurations
+                if size_gb > 100:  # If still over 100GB after configurations
+                    st.warning("⚠️ **Large Table Notice:**")
+                    st.write("• If you're not seeing significant size reduction after applying filters, the table might be extremely large")
+                    st.write("• **Recommendation:** Consider creating a separate table/view with your configurations for more accurate estimates")
+                    st.write("• **Example:** `CREATE TABLE `project.dataset.filtered_table` AS SELECT * FROM `project.dataset.original_table` WHERE your_conditions`")
+                    st.write("• This approach provides more precise size estimates and better performance")
+            
+            # Show warning if sampling was removed for views
+            if error_msg and "Table sampling was automatically disabled" in error_msg:
+                st.warning("⚠️ **View Detected:** Table sampling was automatically disabled because this is a view. TABLESAMPLE only works on base tables.")
+            
+            if not is_allowed:
+                st.error(f"❌ **Configured data size too large!** ({size_gb:.2f} GB > {max_size_gb} GB)")
+                st.warning("⚠️ **Job Submission Blocked:**")
+                st.markdown(f"""
+                Your configured data (with filters, sampling, etc.) is still too large for automated processing. **Job submission is not allowed** until you reduce the data size.
+                
+                **Required Actions:**
+                1. **Contact the ML Team** for assistance with large datasets
+                2. **Reduce your data size** by:
+                   - Using more restrictive WHERE clauses
+                   - Selecting fewer columns
+                   - Using smaller table sampling percentages
+                   - Adding row limits
+                   - Creating a smaller view or table
+                
+                **Current configured size:** {size_gb:.2f} GB  
+                **Maximum allowed:** {max_size_gb} GB
+                
+                **💡 Tip:** Adjust the filtering options above to further reduce your dataset size.
+                """)
+                
+                # Additional guidance for very large tables
+                if size_gb > 100:
+                    st.info("💡 **For Very Large Tables (>100GB):**")
+                    st.write("• **Option 1:** Create a separate filtered table for more accurate estimates")
+                    st.code("""
+CREATE TABLE `your-project.your-dataset.filtered_table` AS
+SELECT * FROM `your-project.your-dataset.original_table`
+WHERE your_filtering_conditions
+LIMIT your_row_limit;
+                    """, language="sql")
+                    st.write("• **Option 2:** Use BigQuery's `CREATE VIEW` for dynamic filtering")
+                    st.code("""
+CREATE VIEW `your-project.your-dataset.filtered_view` AS
+SELECT * FROM `your-project.your-dataset.original_table`
+WHERE your_filtering_conditions;
+                    """, language="sql")
+                    st.write("• **Benefits:** More accurate size estimates, better performance, and cleaner data management")
+                    st.write("• **Why this helps:** When tables are extremely large, BigQuery's dry run estimates may not fully reflect the impact of filters")
+                
+                # Don't return early - continue to show configuration
+                size_check_passed = False
+            else:
+                size_check_passed = True  # Size is within limits
+                st.success("✅ **Data size is within limits!** Your configured BigQuery query is ready for processing.")
+        
+
+        
+        # BigQuery connection test with working configuration
+        # Only allow connection test if size check passed or size is reasonable
+        can_test_connection = size_check_passed or (size_gb <= 10)  # Allow test if size check passed or table is under 10GB
+        
+        if can_test_connection:
+            if st.checkbox("🔍 Test BigQuery Connection", help="Validate table access and preview schema with your configured options"):
+                if table_ref:
+                    with st.spinner("Testing BigQuery connection with your configured options..."):
+                        try:
+                            # Use the proven working BigQuery configuration
+                            from pyspark.sql import SparkSession
+                            
+                            # Create test session with proven working config
+                            test_spark = SparkSession.builder \
+                                .appName("Streamlit BigQuery Test") \
+                                .config("spark.driver.bindAddress", "127.0.0.1") \
+                                .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1") \
+                                .config("spark.driver.memory", "8g") \
+                                .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+                                .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true") \
+                                .config("spark.network.timeout", "600s") \
+                                .config("spark.executor.heartbeatInterval", "120s") \
+                                .getOrCreate()
+                            
+                            # Validate Spark session was created successfully
+                            if test_spark is None:
+                                raise RuntimeError("Failed to create Spark session")
+                            
+                            # Validate table_ref is not None or empty
+                            if not table_ref or table_ref.strip() == "":
+                                raise ValueError("Table reference is empty or None")
+                            
+                            # Validate project_id is properly set
+                            if not project_id or project_id.strip() == "":
+                                st.warning("⚠️ No project ID specified, using default project")
+                                project_id = "default-project"
+                            
+                            # For connection testing, we'll use the original table reference
+                            # but apply the configurations through Spark SQL after loading
+                            st.info(f"🔧 **Testing connection with table:** {table_ref}")
+                            
+                            # Test with direct table reference first
+                            test_df = test_spark.read.format("bigquery") \
+                                .option("parentProject", project_id or "default-project") \
+                                .option("viewsEnabled", "true") \
+                                .option("useAvroLogicalTypes", "true") \
+                                .option("table", table_ref) \
+                                .option("maxRowsPerPartition", 5) \
+                                .load()
+                            
+                            # Apply configurations if they exist
+                            if options and any([options.get('row_limit'), options.get('where_clause'), options.get('select_columns')]):
+                                st.info("🔧 **Applying your configurations to test data...**")
+                                
+                                try:
+                                    # Apply WHERE clause if specified
+                                    if options.get('where_clause'):
+                                        # Convert SQL WHERE clause to Spark filter expression
+                                        where_clause = options['where_clause']
+                                        # For now, we'll skip complex WHERE clauses in testing
+                                        # as they require SQL parsing which is complex
+                                        st.info(f"⚠️ **Note:** WHERE clause '{where_clause}' will be applied in the actual job, not in this test.")
+                                    
+                                    # Apply column selection if specified
+                                    if options.get('select_columns') and options['select_columns'].strip() != '*':
+                                        selected_columns = [col.strip() for col in options['select_columns'].split(',')]
+                                        # Check which columns actually exist in the dataframe
+                                        existing_columns = [col for col in selected_columns if col in test_df.columns]
+                                        if existing_columns:
+                                            test_df = test_df.select(*existing_columns)
+                                            st.info(f"✅ **Applied column selection:** {', '.join(existing_columns)}")
+                                        else:
+                                            st.warning(f"⚠️ **Column selection skipped:** None of the specified columns found in the table")
+                                    
+                                    # Apply row limit if specified
+                                    if options.get('row_limit'):
+                                        test_df = test_df.limit(options['row_limit'])
+                                        st.info(f"✅ **Applied row limit:** {options['row_limit']} rows")
+                                    
+                                    st.success("✅ **Configurations applied successfully!**")
+                                    
+                                except Exception as config_error:
+                                    st.warning(f"⚠️ **Configuration application warning:** {str(config_error)}")
+                                    st.info("💡 **Note:** The connection test will proceed with the original table data. Your configurations will be applied in the actual job.")
+                            
+                            # Get basic info
+                            sample_count = test_df.count()
+                            column_count = len(test_df.columns)
+                            columns = test_df.columns
+                            
+                            # Show success
+                            st.success(f"✅ BigQuery connection successful!")
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Sample Rows", sample_count)
+                            with col2:
+                                st.metric("Total Columns", column_count)
+                            
+                            st.write("**Available Columns:**")
+                            st.write(", ".join(columns[:10]) + ("..." if len(columns) > 10 else ""))
+                            
+                            if sample_count > 0:
+                                if sample_count > 100000:
+                                    st.info("📊 **Large dataset detected** - Sample data preview is disabled for datasets with more than 100K rows to improve performance.")
+                                else:
+                                    st.write("**Sample Data:**")
+                                    sample_pandas = test_df.limit(3).toPandas()
+                                    st.dataframe(sample_pandas)
+                        except Exception as e:
+                            st.error(f"❌ BigQuery connection test failed: {str(e)}")
+                        finally:
+                            # Ensure Spark session is stopped
+                            try:
+                                if 'test_spark' in locals() and test_spark is not None:
+                                    test_spark.stop()
+                            except:
+                                pass  # Ignore errors during cleanup
+                else:
+                    st.warning("⚠️ Please specify a BigQuery table reference first")
+        else:
+            st.info("ℹ️ **Connection Test Disabled:** Table size is too large for safe connection testing. Please reduce the data size or create a filtered table/view first.")
+        
+
         
         # Show configuration summary
         with st.expander("📋 Configuration Summary", expanded=False):
             config_summary = {
                 'table_reference': table_ref,
-                'options': options
+                'options': options,
+                'size_check_passed': size_check_passed
             }
             st.json(config_summary)
         
         return {
             "source_type": "bigquery",
             "data_source": table_ref,
-            "options": options
+            "options": options,
+            "size_check_passed": size_check_passed
         }
     else:
         st.info("📝 Please provide BigQuery table information above")
         return {
             "source_type": "bigquery", 
             "data_source": None,
-            "options": {}
+            "options": {},
+            "size_check_passed": False
         }
 
 def render_auto_detection_section():
@@ -1660,14 +2106,14 @@ def create_job_submission_page():
             with col1:
                 st.subheader("Core Models")
                 model_selections['run_logistic'] = st.checkbox("Logistic Regression", value=task_models.get('run_logistic', True))
-                model_selections['run_random_forest'] = st.checkbox("Random Forest", value=task_models.get('run_random_forest', True))
-                model_selections['run_gradient_boosting'] = st.checkbox("Gradient Boosting", value=task_models.get('run_gradient_boosting', True))
+                model_selections['run_random_forest'] = st.checkbox("Random Forest", value=task_models.get('run_random_forest', False))
+                model_selections['run_gradient_boosting'] = st.checkbox("Gradient Boosting", value=task_models.get('run_gradient_boosting', False))
                 
             with col2:
                 st.subheader("Advanced Models")
-                model_selections['run_decision_tree'] = st.checkbox("Decision Tree", value=task_models.get('run_decision_tree', True))
+                model_selections['run_decision_tree'] = st.checkbox("Decision Tree", value=task_models.get('run_decision_tree', False))
                 model_selections['run_neural_network'] = st.checkbox("Neural Network", value=task_models.get('run_neural_network', False))
-                model_selections['run_xgboost'] = st.checkbox("XGBoost", value=task_models.get('run_xgboost', False))
+                model_selections['run_xgboost'] = st.checkbox("XGBoost", value=task_models.get('run_xgboost', True))
                 model_selections['run_lightgbm'] = st.checkbox("LightGBM", value=task_models.get('run_lightgbm', False))
         
         elif task_type == "regression":
@@ -1676,13 +2122,13 @@ def create_job_submission_page():
             with col1:
                 st.subheader("Core Models")
                 model_selections['run_linear_regression'] = st.checkbox("Linear Regression", value=task_models.get('run_linear_regression', True))
-                model_selections['run_random_forest'] = st.checkbox("Random Forest", value=task_models.get('run_random_forest', True))
-                model_selections['run_gradient_boosting'] = st.checkbox("Gradient Boosting", value=task_models.get('run_gradient_boosting', True))
+                model_selections['run_random_forest'] = st.checkbox("Random Forest", value=task_models.get('run_random_forest', False))
+                model_selections['run_gradient_boosting'] = st.checkbox("Gradient Boosting", value=task_models.get('run_gradient_boosting', False))
                 
             with col2:
                 st.subheader("Advanced Models")
-                model_selections['run_decision_tree'] = st.checkbox("Decision Tree", value=task_models.get('run_decision_tree', True))
-                model_selections['run_xgboost'] = st.checkbox("XGBoost", value=task_models.get('run_xgboost', False))
+                model_selections['run_decision_tree'] = st.checkbox("Decision Tree", value=task_models.get('run_decision_tree', False))
+                model_selections['run_xgboost'] = st.checkbox("XGBoost", value=task_models.get('run_xgboost', True))
                 model_selections['run_lightgbm'] = st.checkbox("LightGBM", value=task_models.get('run_lightgbm', False))
         
         elif task_type == "clustering":
@@ -1910,25 +2356,6 @@ def create_job_submission_page():
                                 default=[3, 5, 7, 10],
                                 key="dbscan_minpts_multiselect"
                             )
-
-            # After all hyperparameter tuning selections, warn if too many models
-            # are selected with tuning enabled.  Long runtimes can lead to job
-            # timeout in the Streamlit front end.  Recommend increasing
-            # timeout_minutes or deselecting some models.
-            if enable_hp_tuning:
-                # Determine how many models the user has enabled
-                model_selections_state = st.session_state.get('model_selections', {})
-                try:
-                    num_models_selected = sum(1 for v in model_selections_state.values() if v)
-                except Exception:
-                    num_models_selected = 0
-                # Issue warning if more than three models are selected
-                if num_models_selected >= 3:
-                    st.warning(
-                        "⚠️ You have enabled hyperparameter tuning for multiple models. "
-                        "This can significantly increase runtime and may exceed the configured timeout. "
-                        "Consider increasing the timeout or reducing the number of selected models before submitting."
-                    )
                     
                     # Gaussian Mixture parameters
                     if st.checkbox("Customize Gaussian Mixture Parameters", value=False, key="gaussian_mixture_params_checkbox"):
@@ -1963,9 +2390,28 @@ def create_job_submission_page():
                                 default=[0.001, 0.01, 0.1],
                                 key="gaussian_reg_param_multiselect"
                             )
+
+            # After all hyperparameter tuning selections, warn if too many models
+            # are selected with tuning enabled.  Long runtimes can lead to job
+            # timeout in the Streamlit front end.  Recommend increasing
+            # timeout_minutes or deselecting some models.
+            if enable_hp_tuning:
+                # Determine how many models the user has enabled
+                model_selections_state = st.session_state.get('model_selections', {})
+                try:
+                    num_models_selected = sum(1 for v in model_selections_state.values() if v)
+                except Exception:
+                    num_models_selected = 0
+                # Issue warning if more than three models are selected
+                if num_models_selected >= 3:
+                    st.warning(
+                        "⚠️ You have enabled hyperparameter tuning for multiple models. "
+                        "This can significantly increase runtime and may exceed the configured timeout. "
+                        "Consider increasing the timeout or reducing the number of selected models before submitting."
+                    )
                 
                 # Classification-specific hyperparameter options
-                elif task_type == "classification":
+                if task_type == "classification":
                     st.markdown("---")
                     st.markdown("**🔧 Classification Hyperparameter Ranges**")
                     st.markdown("""
@@ -2028,6 +2474,7 @@ def create_job_submission_page():
                     if st.checkbox("Customize Random Forest Parameters", value=False, key="rf_params_checkbox"):
                         st.markdown("**Random Forest Hyperparameters:**")
                         st.info("💡 Random Forest creates multiple decision trees and combines their predictions")
+                        st.success("✅ **Optimized:** Tree-based optimizations are automatically applied to reduce broadcast warnings and improve performance.")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -2036,7 +2483,7 @@ def create_job_submission_page():
                             rf_num_trees_options = st.multiselect(
                                 "Choose number of trees to test:",
                                 [10, 20, 50, 100, 200],
-                                default=[10, 20, 50, 100],
+                                default=[10, 20, 50],  # Reduced from [10, 20, 50, 100]
                                 key="rf_num_trees_multiselect"
                             )
                             
@@ -2045,7 +2492,7 @@ def create_job_submission_page():
                             rf_max_depth_options = st.multiselect(
                                 "Choose max depths:",
                                 [3, 5, 10, 15, 20, 30],
-                                default=[3, 5, 10, 15, 20],
+                                default=[3, 5, 10],  # Reduced from [3, 5, 10, 15, 20]
                                 key="rf_max_depth_multiselect"
                             )
                         with col2:
@@ -2054,7 +2501,7 @@ def create_job_submission_page():
                             rf_min_instances_options = st.multiselect(
                                 "Choose minimum instances:",
                                 [1, 2, 5, 10, 20],
-                                default=[1, 2, 5, 10],
+                                default=[1, 2, 5],  # Reduced from [1, 2, 5, 10]
                                 key="rf_min_instances_multiselect"
                             )
                     
@@ -2062,6 +2509,7 @@ def create_job_submission_page():
                     if st.checkbox("Customize Gradient Boosting Parameters", value=False, key="gb_params_checkbox"):
                         st.markdown("**Gradient Boosting Hyperparameters:**")
                         st.info("💡 Gradient Boosting builds an ensemble by sequentially adding weak learners")
+                        st.success("✅ **Optimized:** Gradient boosting optimizations are automatically applied to reduce broadcast warnings and improve performance.")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -2070,7 +2518,7 @@ def create_job_submission_page():
                             gb_max_iter_options = st.multiselect(
                                 "Choose iteration limits to test:",
                                 [10, 20, 50, 100, 200],
-                                default=[10, 20, 50, 100],
+                                default=[10, 20],  # Further reduced from [10, 20, 30]
                                 key="gb_max_iter_multiselect"
                             )
                             
@@ -2079,7 +2527,7 @@ def create_job_submission_page():
                             gb_max_depth_options = st.multiselect(
                                 "Choose max depths:",
                                 [3, 5, 10, 15, 20],
-                                default=[3, 5, 10, 15],
+                                default=[3, 5],  # Further reduced from [3, 5, 7]
                                 key="gb_max_depth_multiselect"
                             )
                         with col2:
@@ -2088,7 +2536,7 @@ def create_job_submission_page():
                             gb_step_size_options = st.multiselect(
                                 "Choose step sizes:",
                                 [0.01, 0.05, 0.1, 0.2, 0.3],
-                                default=[0.1, 0.2, 0.3],
+                                default=[0.1],  # Further reduced from [0.1, 0.2]
                                 key="gb_step_size_multiselect"
                             )
                     
@@ -2096,6 +2544,7 @@ def create_job_submission_page():
                     if st.checkbox("Customize XGBoost Parameters", value=False, key="xgb_params_checkbox"):
                         st.markdown("**XGBoost Hyperparameters:**")
                         st.info("💡 XGBoost is a gradient boosting framework that's highly optimized for performance")
+                        st.success("✅ **Optimized:** Tree-based optimizations are automatically applied to reduce broadcast warnings and improve performance.")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -2104,7 +2553,7 @@ def create_job_submission_page():
                             xgb_max_depth_options = st.multiselect(
                                 "Choose max depths:",
                                 [3, 4, 5, 6, 7, 8, 9, 10, 12, 15],
-                                default=[3, 5, 7, 10],
+                                default=[3, 5, 7],  # Reduced from [3, 5, 7, 10]
                                 key="xgb_max_depth_multiselect"
                             )
                             
@@ -2113,7 +2562,7 @@ def create_job_submission_page():
                             xgb_num_round_options = st.multiselect(
                                 "Choose number of rounds:",
                                 [30, 50, 75, 100, 125, 150, 175, 200, 250, 300],
-                                default=[50, 100, 150, 200],
+                                default=[30, 50, 75],  # Reduced from [50, 100, 150, 200]
                                 key="xgb_num_round_multiselect"
                             )
                             
@@ -2122,7 +2571,7 @@ def create_job_submission_page():
                             xgb_eta_options = st.multiselect(
                                 "Choose eta values:",
                                 [0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3],
-                                default=[0.05, 0.1, 0.15, 0.2],
+                                default=[0.01, 0.05, 0.1],  # Reduced from [0.05, 0.1, 0.15, 0.2]
                                 key="xgb_eta_multiselect"
                             )
                         with col2:
@@ -2131,7 +2580,7 @@ def create_job_submission_page():
                             xgb_subsample_options = st.multiselect(
                                 "Choose subsample ratios:",
                                 [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                                default=[0.8, 0.9, 1.0],
+                                default=[0.7, 0.8, 1.0],  # Reduced from [0.8, 0.9, 1.0]
                                 key="xgb_subsample_multiselect"
                             )
                             
@@ -2140,7 +2589,7 @@ def create_job_submission_page():
                             xgb_colsample_bytree_options = st.multiselect(
                                 "Choose column sample ratios:",
                                 [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                                default=[0.8, 0.9, 1.0],
+                                default=[0.7, 0.8, 1.0],  # Reduced from [0.8, 0.9, 1.0]
                                 key="xgb_colsample_bytree_multiselect"
                             )
                             
@@ -2149,7 +2598,7 @@ def create_job_submission_page():
                             xgb_min_child_weight_options = st.multiselect(
                                 "Choose min child weights:",
                                 [1, 2, 3, 5, 7, 10],
-                                default=[1, 2, 3, 5],
+                                default=[1, 3, 5],  # Reduced from [1, 2, 3, 5]
                                 key="xgb_min_child_weight_multiselect"
                             )
                     
@@ -2157,6 +2606,7 @@ def create_job_submission_page():
                     if st.checkbox("Customize Decision Tree Parameters", value=False, key="dt_params_checkbox"):
                         st.markdown("**Decision Tree Hyperparameters:**")
                         st.info("💡 Decision Tree creates a tree structure to make predictions based on feature splits")
+                        st.success("✅ **Optimized:** Tree-based optimizations are automatically applied to reduce broadcast warnings and improve performance.")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -2165,7 +2615,7 @@ def create_job_submission_page():
                             dt_max_depth_options = st.multiselect(
                                 "Choose max depths:",
                                 [3, 5, 10, 15, 20, 30],
-                                default=[3, 5, 10, 15, 20],
+                                default=[3, 5, 10],  # Reduced from [3, 5, 10, 15, 20]
                                 key="dt_max_depth_multiselect"
                             )
                             
@@ -2174,7 +2624,7 @@ def create_job_submission_page():
                             dt_min_instances_options = st.multiselect(
                                 "Choose minimum instances:",
                                 [1, 2, 5, 10, 20],
-                                default=[1, 2, 5, 10],
+                                default=[1, 2, 5],  # Reduced from [1, 2, 5, 10]
                                 key="dt_min_instances_multiselect"
                             )
                         with col2:
@@ -2183,7 +2633,7 @@ def create_job_submission_page():
                             dt_min_info_gain_options = st.multiselect(
                                 "Choose min info gains:",
                                 [0.0, 0.01, 0.05, 0.1, 0.2],
-                                default=[0.0, 0.01, 0.1],
+                                default=[0.0, 0.01],  # Reduced from [0.0, 0.01, 0.1]
                                 key="dt_min_info_gain_multiselect"
                             )
                     
@@ -2192,23 +2642,30 @@ def create_job_submission_page():
                         st.markdown("**Neural Network Hyperparameters:**")
                         st.info("💡 Neural Network uses multiple layers of neurons to learn complex patterns")
                         
+                        # Add feature count guidance
+                        st.warning("⚠️ **Important:** Layer sizes will be automatically adjusted if they exceed your dataset's feature count to prevent errors.")
+                        
                         col1, col2 = st.columns(2)
                         with col1:
                             st.markdown("**Layer Configurations** 🧠")
-                            st.caption("Different network architectures to test. More layers = more complex model.")
+                            st.caption("Hidden layer architectures. First layer size will be adjusted if it exceeds your feature count.")
                             nn_layers_options = st.multiselect(
                                 "Choose layer configurations:",
-                                ["[10]", "[20]", "[10, 10]", "[20, 20]", "[10, 10, 10]"],
-                                default=["[10]", "[20]", "[10, 10]"],
+                                ["[8]", "[16]", "[8, 4]", "[16, 8]", "[16, 8, 4]"],  # Updated to match backend fixes
+                                default=["[8]", "[16]", "[8, 4]"],  # More conservative defaults
                                 key="nn_layers_multiselect"
                             )
+                            
+                            # Add layer size guidance
+                            if nn_layers_options:
+                                st.info("💡 **Layer Guide:**\n- `[8]`: Simple single layer\n- `[16]`: Larger single layer\n- `[8, 4]`: Two layers, decreasing size\n- `[16, 8]`: Two layers, moderate size\n- `[16, 8, 4]`: Three layers, gradually decreasing")
                             
                             st.markdown("**Max Iterations** 🔄")
                             st.caption("Maximum training iterations. Higher = more thorough training but slower.")
                             nn_max_iter_options = st.multiselect(
                                 "Choose iteration limits:",
-                                [50, 100, 200, 300],
-                                default=[50, 100, 200],
+                                [50, 100, 200],  # Reduced from [50, 100, 200, 300] to match backend
+                                default=[50, 100],  # More conservative defaults
                                 key="nn_max_iter_multiselect"
                             )
                         with col2:
@@ -2216,8 +2673,8 @@ def create_job_submission_page():
                             st.caption("Number of samples per batch. Affects memory usage and training speed.")
                             nn_block_size_options = st.multiselect(
                                 "Choose block sizes:",
-                                [32, 64, 128, 256],
-                                default=[32, 64, 128],
+                                [32, 64, 128],  # Reduced from [32, 64, 128, 256] to match backend
+                                default=[32, 64],  # More conservative defaults
                                 key="nn_block_size_multiselect"
                             )
                     
@@ -2225,6 +2682,7 @@ def create_job_submission_page():
                     if st.checkbox("Customize LightGBM Parameters", value=False, key="lgb_params_checkbox"):
                         st.markdown("**LightGBM Hyperparameters:**")
                         st.info("💡 LightGBM is a gradient boosting framework optimized for efficiency and speed")
+                        st.success("✅ **Optimized:** Tree-based optimizations are automatically applied to reduce broadcast warnings and improve performance.")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -2233,7 +2691,7 @@ def create_job_submission_page():
                             lgb_num_leaves_options = st.multiselect(
                                 "Choose number of leaves:",
                                 [5, 10, 15, 20, 25, 31, 40, 50, 60, 80, 100, 120],
-                                default=[15, 25, 31, 50],
+                                default=[5, 15, 31],  # Reduced from [15, 25, 31, 50]
                                 key="lgb_num_leaves_multiselect"
                             )
                             
@@ -2242,7 +2700,7 @@ def create_job_submission_page():
                             lgb_num_iterations_options = st.multiselect(
                                 "Choose number of iterations:",
                                 [30, 50, 75, 100, 125, 150, 175, 200, 250, 300],
-                                default=[50, 100, 150, 200],
+                                default=[30, 50, 75],  # Reduced from [50, 100, 150, 200]
                                 key="lgb_num_iterations_multiselect"
                             )
                             
@@ -2251,7 +2709,7 @@ def create_job_submission_page():
                             lgb_learning_rate_options = st.multiselect(
                                 "Choose learning rates:",
                                 [0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3],
-                                default=[0.05, 0.1, 0.15, 0.2],
+                                default=[0.01, 0.05, 0.1],  # Reduced from [0.05, 0.1, 0.15, 0.2]
                                 key="lgb_learning_rate_multiselect"
                             )
                         with col2:
@@ -2260,7 +2718,7 @@ def create_job_submission_page():
                             lgb_feature_fraction_options = st.multiselect(
                                 "Choose feature fractions:",
                                 [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                                default=[0.8, 0.9, 1.0],
+                                default=[0.7, 0.8, 1.0],  # Reduced from [0.8, 0.9, 1.0]
                                 key="lgb_feature_fraction_multiselect"
                             )
                             
@@ -2269,7 +2727,7 @@ def create_job_submission_page():
                             lgb_bagging_fraction_options = st.multiselect(
                                 "Choose bagging fractions:",
                                 [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                                default=[0.8, 0.9, 1.0],
+                                default=[0.7, 0.8, 1.0],  # Reduced from [0.8, 0.9, 1.0]
                                 key="lgb_bagging_fraction_multiselect"
                             )
                 
@@ -2520,6 +2978,9 @@ def create_job_submission_page():
                                 default=[0.8, 0.9, 1.0],
                                 key="lgb_reg_feature_fraction_multiselect"
                             )
+                    
+                    # Disable hyperparameter tuning by default
+                    st.session_state['enable_hp_tuning'] = False
     
     with tab4:
         st.header("Advanced Configuration")
@@ -2918,6 +3379,21 @@ def create_job_submission_page():
                 # For BigQuery, we don't need to handle file uploads - data comes directly from BigQuery
                 final_data_file = enhanced_data_config['data_source']  # Use BigQuery table reference
                 st.success(f"🔗 BigQuery data source configured: {final_data_file}")
+                
+                # Check if BigQuery table/view size check passed
+                size_check_passed = enhanced_data_config.get('size_check_passed', False)
+                if not size_check_passed:
+                    st.error("❌ **BigQuery table/view size check failed!**")
+                    st.warning("⚠️ **Job submission blocked:** Table/view size exceeds the maximum allowed limit.")
+                    st.info("💡 **Next steps:**")
+                    st.markdown("""
+                    1. **Contact the ML Team** for assistance with large datasets
+                    2. **Reduce your data size** using the filtering options in the BigQuery configuration
+                    3. **Use a smaller subset** of your data for initial model development
+                    """)
+                    # Reset the submission flag and prevent job submission
+                    st.session_state.job_submission_in_progress = False
+                    return
                 
             elif enhanced_data_config and enhanced_data_config.get('source_type') == 'upload':
                 # Handle enhanced uploaded files
@@ -4043,7 +4519,6 @@ def display_model_performance(output_dir: str, task_type: str = 'classification'
         # Display SHAP values table if available
         if os.path.exists(shap_values_path):
             try:
-                import pandas as pd  # Local import to avoid unnecessary overhead
                 shap_df = pd.read_csv(shap_values_path)
                 st.markdown("**Top SHAP Contributions (first 50 rows):**")
                 st.dataframe(shap_df.head(50))
@@ -4213,6 +4688,9 @@ def display_ks_decile_tables(output_dir: str):
         if not ks_files:
             return  # No KS files found
         
+        # Initialize sorted_model_files to avoid UnboundLocalError
+        sorted_model_files = []
+        
         st.subheader("📊 KS Decile Tables")
         st.markdown("Kolmogorov-Smirnov (KS) decile analysis for binary classification models")
         
@@ -4229,6 +4707,9 @@ def display_ks_decile_tables(output_dir: str):
         if len(unique_ks_files) == 1:
             # Single model - display directly
             display_single_ks_table(unique_ks_files[0])
+            # Create single-item list for sorted_model_files
+            model_name = os.path.basename(os.path.dirname(unique_ks_files[0]))
+            sorted_model_files = [(model_name, unique_ks_files[0])]
         else:
             # Multiple models - create tabs with consistent ordering
             model_files = []

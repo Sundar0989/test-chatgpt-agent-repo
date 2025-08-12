@@ -2,6 +2,45 @@
 # This configuration supports Classification, Regression, and Clustering tasks
 # with shared global settings and task-specific configurations
 
+# Global optimization settings
+global_optimization:
+  # Spark autoscaling configuration
+  autoscaling:
+    enable_autoscaling: true
+    min_executors: 2
+    max_executors: 20
+    target_processing_time_minutes: 30
+    enable_auto_adjustment: true
+    executor_scaling_factor: 0.1
+    memory_scaling_factor: 2.0
+    partition_scaling_factor: 0.5
+  
+  # Temporary table management
+  temp_tables:
+    enable_temp_tables: true
+    enable_caching: true
+    auto_cleanup: true
+    max_table_age_hours: 12
+    optimize_storage: true
+    table_prefix: "temp_automl"
+    use_session_id: true
+  
+  # Pipeline optimization
+  pipeline:
+    enable_pipeline_optimization: true
+    stage_optimization: true
+    memory_management: true
+    performance_monitoring: true
+    auto_cleanup: true
+    optimization_target: "balanced"  # speed, memory, balanced, quality
+  
+  # Performance monitoring
+  monitoring:
+    track_performance: true
+    performance_history_size: 50
+    enable_metrics_collection: true
+    report_interval_minutes: 10
+
 # Environment-specific configurations
 environments:
   development:
@@ -11,14 +50,30 @@ environments:
       memory_limit_gb: 4            # Lower memory usage
       timeout_minutes: 30           # Shorter timeout for quick iteration
     
+    # Development-specific optimization settings
+    optimization:
+      autoscaling:
+        enable_autoscaling: false    # Disable autoscaling in dev for stability
+        min_executors: 1
+        max_executors: 4
+        target_processing_time_minutes: 15
+      
+      temp_tables:
+        enable_temp_tables: true
+        enable_caching: false        # Disable caching in dev for debugging
+        max_table_age_hours: 2       # Shorter table lifetime in dev
+      
+      pipeline:
+        optimization_target: "speed"  # Focus on speed in development
+    
     classification:
       models:
         run_logistic: true
-        run_random_forest: true
+        run_random_forest: false
         run_gradient_boosting: false    # Disable slow models in dev
         run_neural_network: false      # Disable slow models in dev
-        run_decision_tree: true
-        run_xgboost: false             # Disable in dev for speed
+        run_decision_tree: false
+        run_xgboost: true
         run_lightgbm: false            # Disable in dev for speed
       
       hyperparameter_tuning:
@@ -45,18 +100,34 @@ environments:
       memory_limit_gb: 8
       timeout_minutes: 60
     
+    # Staging-specific optimization settings
+    optimization:
+      autoscaling:
+        enable_autoscaling: true
+        min_executors: 2
+        max_executors: 10
+        target_processing_time_minutes: 45
+      
+      temp_tables:
+        enable_temp_tables: true
+        enable_caching: true
+        max_table_age_hours: 6        # Moderate table lifetime in staging
+      
+      pipeline:
+        optimization_target: "balanced"  # Balanced optimization in staging
+    
     classification:
       models:
         run_logistic: true
-        run_random_forest: true
-        run_gradient_boosting: true
+        run_random_forest: false
+        run_gradient_boosting: false
         run_neural_network: false      # Still skip heavy models
-        run_decision_tree: true
-        run_xgboost: "auto"            # Auto-detect availability
-        run_lightgbm: "auto"           # Auto-detect availability
+        run_decision_tree: false
+        run_xgboost: true
+        run_lightgbm: false
       
       hyperparameter_tuning:
-        enable_hyperparameter_tuning: true
+        enable_hyperparameter_tuning: false
         optimization_method: "random_search"  # Balanced approach
         random_search_trials: 15
         optuna_trials: 25
@@ -79,18 +150,36 @@ environments:
       memory_limit_gb: 16
       timeout_minutes: 120            # Allow longer training
     
+    # Production-specific optimization settings
+    optimization:
+      autoscaling:
+        enable_autoscaling: true
+        min_executors: 4
+        max_executors: 20
+        target_processing_time_minutes: 60
+        enable_auto_adjustment: true
+      
+      temp_tables:
+        enable_temp_tables: true
+        enable_caching: true
+        max_table_age_hours: 24       # Longer table lifetime in production
+        optimize_storage: true
+      
+      pipeline:
+        optimization_target: "quality"  # Focus on quality in production
+    
     classification:
       models:
         run_logistic: true
-        run_random_forest: true
-        run_gradient_boosting: true
-        run_neural_network: true       # Enable all models
-        run_decision_tree: true
-        run_xgboost: "auto"
-        run_lightgbm: "auto"
+        run_random_forest: false
+        run_gradient_boosting: false
+        run_neural_network: false
+        run_decision_tree: false
+        run_xgboost: true
+        run_lightgbm: false
       
       hyperparameter_tuning:
-        enable_hyperparameter_tuning: true
+        enable_hyperparameter_tuning: false
         optimization_method: "optuna"  # Most sophisticated method
         random_search_trials: 30
         optuna_trials: 100             # Extensive search
@@ -216,12 +305,12 @@ regression:
   # Model selection
   models:
     run_linear_regression: true
-    run_random_forest: true
-    run_gradient_boosting: true
-    run_neural_network: true
-    run_decision_tree: true
-    run_xgboost: "auto"
-    run_lightgbm: "auto"
+    run_random_forest: false
+    run_gradient_boosting: false
+    run_neural_network: false
+    run_decision_tree: false
+    run_xgboost: true
+    run_lightgbm: false
   
   # Model evaluation
   evaluation:
@@ -236,7 +325,7 @@ regression:
   
   # Hyperparameter optimization
   hyperparameter_tuning:
-    enable_hyperparameter_tuning: true
+    enable_hyperparameter_tuning: false
     optimization_method: "optuna"
     optuna_trials: 50
     optuna_timeout: 300
@@ -256,7 +345,7 @@ clustering:
   # Model selection (only implemented models enabled)
   models:
     run_kmeans: true
-    run_bisecting_kmeans: true
+    run_bisecting_kmeans: false
     run_dbscan: false          # Not implemented yet
     run_gaussian_mixture: false  # Not implemented yet
     run_hierarchical: false    # Not implemented yet
@@ -284,7 +373,7 @@ clustering:
   
   # Hyperparameter optimization
   hyperparameter_tuning:
-    enable_hyperparameter_tuning: true     # Enable by default for better results
+    enable_hyperparameter_tuning: false    # Disable by default for faster execution
     optimization_method: "optuna"
     optuna_trials: 50                      # Increased for better exploration
     optuna_timeout: 600                    # 10 minutes for thorough search

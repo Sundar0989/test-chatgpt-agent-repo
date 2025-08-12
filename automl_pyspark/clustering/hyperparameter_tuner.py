@@ -116,10 +116,30 @@ class ClusteringHyperparameterTuner:
         n_trials = hp_config.get('optuna_trials', config.get('optuna_trials', 50))
         timeout = hp_config.get('optuna_timeout', config.get('optuna_timeout', 300))
         
+        # Ultra-aggressive limits for clustering models to prevent memory issues
+        if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+            n_trials = min(n_trials, 5)   # Ultra-conservative: only 5 trials max
+            timeout = min(timeout, 180)   # 3 minutes max timeout
+            print(f"   🌟 Clustering model optimization: {n_trials} trials, {timeout}s timeout (ultra-conservative)")
+        
+        # Conservative limits for DBSCAN
+        if model_type.lower() == 'dbscan':
+            n_trials = min(n_trials, 3)   # Conservative: only 3 trials max
+            timeout = min(timeout, 120)   # 2 minutes max timeout
+            print(f"   🔍 DBSCAN optimization: {n_trials} trials, {timeout}s timeout (conservative)")
+        
         print(f"   🎯 Optuna trials configured: {n_trials}")
         
         # Track trial count for cleanup
         trial_counter = {'count': 0}
+        
+        # Add global timeout protection
+        optimization_start_time = time.time()
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+            max_optimization_time = 180  # 3 minutes max for clustering models
+        elif model_type.lower() == 'dbscan':
+            max_optimization_time = 120  # 2 minutes max for DBSCAN
         
         # Create Optuna study
         study = optuna.create_study(
@@ -129,24 +149,53 @@ class ClusteringHyperparameterTuner:
         
         # Define objective function
         def objective(trial):
+            # Check global timeout
+            if time.time() - optimization_start_time > max_optimization_time:
+                print(f"    ⏰ Global optimization timeout reached ({max_optimization_time}s)")
+                return -1.0  # Return worst silhouette score to stop optimization
+            
             trial_counter['count'] += 1
             current_trial = trial_counter['count']
             
-            params = self._suggest_optuna_params(trial, model_type, k_range)
-            score = self._evaluate_params(model_type, params, train_data)
-            
-            # Clean up every 5 trials to reduce memory pressure
-            if current_trial % 5 == 0:
+            # Force memory cleanup between trials to prevent memory accumulation
+            if trial_counter['count'] > 1:  # Skip first trial
                 try:
-                    # Force garbage collection hint to Spark
+                    import gc
+                    gc.collect()  # Force Python garbage collection
+                    
+                    # Force Spark garbage collection
                     if hasattr(self.spark, 'sparkContext'):
                         self.spark.sparkContext._jvm.System.gc()
-                    print(f"   🧹 Cleaned up after trial {current_trial}")
-                    time.sleep(1)  # Brief pause for GC
-                except:
-                    pass
+                    
+                    # Clear Spark cache if available
+                    try:
+                        self.spark.catalog.clearCache()
+                    except:
+                        pass
+                    
+                    print(f"   🧹 Memory cleanup after trial {trial_counter['count'] - 1}")
+                    
+                    # Brief pause to allow cleanup
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"   ⚠️ Memory cleanup failed: {e}")
             
-            return score
+            try:
+                params = self._suggest_optuna_params(trial, model_type, k_range)
+                score = self._evaluate_params(model_type, params, train_data)
+                
+                # Check for early termination for clustering models
+                if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+                    # If we've had 3 successful trials, stop early to prevent memory issues
+                    if trial_counter['count'] >= 3:
+                        print(f"    🛑 Early termination: {trial_counter['count']} successful trials completed for clustering model")
+                        print(f"    💡 This prevents memory accumulation")
+                        return 0.0  # Return neutral score to stop optimization
+                
+                return score
+            except Exception as e:
+                print(f"     ⚠️  Error evaluating parameters: {str(e)[:100]}...")
+                return -1.0  # Return worst silhouette score
         
         # Run optimization
         try:
@@ -195,12 +244,35 @@ class ClusteringHyperparameterTuner:
         hp_config = config.get('hyperparameter_tuning', {})
         n_trials = hp_config.get('random_trials', config.get('random_search_trials', 20))
         
+        # Ultra-aggressive limits for clustering models to prevent memory issues
+        if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+            n_trials = min(n_trials, 5)   # Ultra-conservative: only 5 trials max
+            print(f"   🌟 Clustering model optimization: {n_trials} trials (ultra-conservative)")
+        
+        # Conservative limits for DBSCAN
+        if model_type.lower() == 'dbscan':
+            n_trials = min(n_trials, 3)   # Conservative: only 3 trials max
+            print(f"   🔍 DBSCAN optimization: {n_trials} trials (conservative)")
+        
         print(f"   🎯 Random search trials configured: {n_trials}")
         param_space = self._get_param_space(model_type, k_range)
         
         best_params = None
         best_score = -1.0  # Silhouette score ranges from -1 to 1
         all_results = []
+        successful_trials = 0
+        
+        start_time = time.time()
+        trial_count = 0
+        
+        # Add global timeout protection for clustering models
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+            max_optimization_time = 180  # 3 minutes max for clustering models
+            print(f"   ⏰ Global timeout set to {max_optimization_time}s for clustering model")
+        elif model_type.lower() == 'dbscan':
+            max_optimization_time = 120  # 2 minutes max for DBSCAN
+            print(f"   ⏰ Global timeout set to {max_optimization_time}s for DBSCAN")
         
         # Chunk trials to reduce memory pressure and broadcasting warnings
         chunk_size = 5  # Process 5 trials at a time
@@ -214,6 +286,32 @@ class ClusteringHyperparameterTuner:
             chunk_results = []
             
             for trial in trial_chunk:
+                # Check global timeout
+                if time.time() - start_time > max_optimization_time:
+                    print(f"⏰ Global optimization timeout reached after {trial} trials")
+                    break
+                
+                # Force memory cleanup between trials for clustering models
+                if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture'] and trial > 0:
+                    try:
+                        import gc
+                        gc.collect()  # Force Python garbage collection
+                        
+                        # Force Spark garbage collection
+                        if hasattr(self.spark, 'sparkContext'):
+                            self.spark.sparkContext._jvm.System.gc()
+                        
+                        # Clear Spark cache if available
+                        try:
+                            self.spark.catalog.clearCache()
+                        except:
+                            pass
+                        
+                        print(f"    🧹 Memory cleanup before trial {trial + 1}")
+                        time.sleep(0.5)  # Brief pause for cleanup
+                    except Exception as e:
+                        print(f"    ⚠️ Memory cleanup failed: {e}")
+                
                 # Sample random parameters
                 params = {}
                 for param_name, param_range in param_space.items():
@@ -228,12 +326,21 @@ class ClusteringHyperparameterTuner:
                 # Evaluate parameters
                 score = self._evaluate_params(model_type, params, train_data)
                 chunk_results.append({'params': params, 'score': score})
+                successful_trials += 1
                 
                 if score > best_score:
                     best_score = score
                     best_params = params.copy()
                 
                 print(f"     Trial {trial + 1}/{n_trials}: Silhouette = {score:.4f}")
+                
+                # Check for early termination for clustering models
+                if model_type.lower() in ['kmeans', 'bisecting_kmeans', 'gaussian_mixture']:
+                    # If we've had 3 successful trials, stop early to prevent memory issues
+                    if successful_trials >= 3:
+                        print(f"    🛑 Early termination: {successful_trials} successful trials completed for clustering model")
+                        print(f"    💡 This prevents memory accumulation")
+                        break
             
             # Add chunk results to overall results
             all_results.extend(chunk_results)
@@ -557,6 +664,9 @@ class ClusteringHyperparameterTuner:
             # the one in ClusteringModelBuilder._create_dbscan_model.
             if not SKLEARN_AVAILABLE:
                 raise ImportError("DBSCAN requires sklearn. Install with: pip install scikit-learn")
+
+            # Import numpy for DBSCAN operations
+            import numpy as np
 
             eps = params.get('eps', 0.5)
             minPts = params.get('minPts', 5)

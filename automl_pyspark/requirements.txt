@@ -1,171 +1,63 @@
-# AutoML PySpark Pipeline - Comprehensive Requirements
-# ================================================
-# This file includes all dependencies for the complete AutoML pipeline
-# with support for classification, regression (future), and clustering (future)
-
-# ================================================
-# CORE DEPENDENCIES (Required)
-# ================================================
-
-# Big Data Processing
-pyspark>=3.3.0,<4.0.0           # Core PySpark for distributed computing
-
-# Data Science Stack
-pandas>=1.3.0,<3.0.0            # Data manipulation and analysis
-numpy>=1.21.0,<2.0.0            # Numerical computing
-scipy>=1.9.0                    # Scientific computing and statistics
-scikit-learn>=1.0.0,<2.0.0      # Machine learning algorithms
-
-# Configuration Management
-PyYAML>=6.0.0                   # YAML configuration file support
-
-# Data Processing Utilities
-joblib>=1.1.0                   # Efficient serialization and parallel computing
-openpyxl>=3.0.0                 # Excel file support (.xlsx)
-xlsxwriter>=3.0.0               # Excel file writing with formatting
-
-# ================================================
-# ADVANCED ML ALGORITHMS (Optional but Recommended)
-# ================================================
-
-# Gradient Boosting Frameworks
-xgboost>=1.6.0                  # XGBoost with PySpark support
-# Note: Uncomment below if you want LightGBM support
-# synapseml>=0.11.0             # LightGBM integration for PySpark (formerly mmlspark)
-
-# ================================================
-# HYPERPARAMETER OPTIMIZATION (Optional)
-# ================================================
-
-# Advanced Optimization
-optuna>=3.0.0                   # Bayesian optimization for hyperparameter tuning
-# Note: Random Search and Grid Search are included in scikit-learn
-
-# ================================================
-# VISUALIZATION AND REPORTING (Optional)
-# ================================================
-
-# Plotting Libraries
-matplotlib>=3.5.0               # Basic plotting
-seaborn>=0.11.0                 # Statistical data visualization
-
-# Web Interface and Interactive Dashboards
-streamlit>=1.28.0               # Web interface for AutoML
-plotly>=5.15.0                  # Interactive plotting for Streamlit dashboard
-
-# ================================================
-# WEB UI (Optional)
-# ================================================
-
-# Uncomment if you want to use the Streamlit web interface
-streamlit>=1.28.0             # Interactive web interface for AutoML
-pandas>=1.5.0
-plotly>=5.15.0
-pyyaml>=6.0 
-
-# ================================================
-# CLOUD INTEGRATIONS (Optional)
-# ================================================
-
-# Google Cloud Platform
-# google-cloud-bigquery>=3.0.0  # BigQuery integration
-# google-cloud-storage>=2.0.0   # Google Cloud Storage
-
-# Amazon Web Services
-# boto3>=1.20.0                 # AWS S3 and other services
-
-# Microsoft Azure
-# azure-storage-blob>=12.0.0    # Azure Blob Storage
-
-# ================================================
-# DEVELOPMENT DEPENDENCIES (Optional)
-# ================================================
-
-# Testing Framework
-# pytest>=7.0.0                # Unit testing framework
-# pytest-cov>=4.0.0            # Coverage reporting
-# pytest-mock>=3.8.0           # Mocking for tests
-
-# Code Quality
-# black>=22.0.0                # Code formatting
-# flake8>=5.0.0                # Linting
-# mypy>=0.991                  # Type checking
-# isort>=5.10.0                # Import sorting
-
-# ================================================
-# DOCUMENTATION (Optional)
-# ================================================
-
-# Documentation Generation
-# sphinx>=5.0.0                # Documentation generator
-# sphinx-rtd-theme>=1.0.0      # Read the Docs theme
-# myst-parser>=0.18.0          # Markdown support for Sphinx
-
-# ================================================
-# JUPYTER NOTEBOOK SUPPORT (Optional)
-# ================================================
-
-# Jupyter Environment
-# jupyter>=1.0.0               # Jupyter notebook
-# ipywidgets>=8.0.0            # Interactive widgets
-# plotly>=5.0.0                # Interactive plotting
-
-# ================================================
-# INSTALLATION INSTRUCTIONS
-# ================================================
-
-# Basic installation (core functionality):
-#   pip install -r requirements.txt
-
-# Development installation (with dev tools):
-#   pip install -r requirements.txt
-#   pip install pytest black flake8 mypy
-
-# Full installation (all features):
-#   pip install -r requirements.txt
-#   pip install synapseml streamlit google-cloud-bigquery boto3
-
-# ================================================
-# ENVIRONMENT-SPECIFIC INSTALLATIONS
-# ================================================
-
-# For development environment (minimal, fast setup):
-#   pip install pyspark pandas numpy scikit-learn PyYAML joblib matplotlib
-
-# For staging environment (balanced):
-#   pip install -r requirements.txt
-#   pip install optuna xgboost
-
-# For production environment (all features):
-#   pip install -r requirements.txt
-#   pip install optuna xgboost synapseml
-
-# ================================================
-# COMPATIBILITY NOTES
-# ================================================
-
-# Python: Requires Python 3.8+
-# Java: PySpark requires Java 8 or 11 (for Spark compatibility)
-# Memory: Minimum 4GB RAM recommended, 8GB+ for large datasets
-# OS: Compatible with Linux, macOS, and Windows
-
-# ================================================
-# TROUBLESHOOTING
-# ================================================
-
-# If you encounter issues with specific packages:
-# 
-# XGBoost issues:
-#   - Ensure Java is installed and JAVA_HOME is set
-#   - Try: pip install xgboost --no-cache-dir
-#
-# SynapseML (LightGBM) issues:
-#   - Requires Scala 2.12 and Spark 3.2+
-#   - May need: pip install synapseml[lightgbm]
-#
-# PySpark issues:
-#   - Set PYSPARK_PYTHON environment variable
-#   - For Windows: may need winutils.exe
-#
-# Memory issues:
-#   - Increase JVM heap size: --driver-memory 4g --executor-memory 4g 
+GitPython==3.1.45
+google-api-core==2.25.1
+google-auth==2.40.3
+google-cloud-bigquery==3.35.1
+google-cloud-core==2.4.3
+google-cloud-storage==3.2.0
+google-crc32c==1.7.1
+google-resumable-media==2.7.2
+googleapis-common-protos==1.70.0
+grpcio==1.74.0
+grpcio-status==1.74.0
+idna==3.10
+Jinja2==3.1.6
+joblib==1.5.1
+jsonschema==4.25.0
+jsonschema-specifications==2025.4.1
+kiwisolver==1.4.8
+lightgbm==4.6.0
+Mako==1.3.10
+MarkupSafe==3.0.2
+matplotlib==3.10.3
+narwhals==2.0.1
+numpy==1.26.4
+openpyxl==3.1.5
+optuna==4.4.0
+packaging==25.0
+pandas==2.3.1
+pillow==11.3.0
+plotly==6.2.0
+proto-plus==1.26.1
+protobuf==6.31.1
+py4j==0.10.9.7
+pyarrow==21.0.0
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+pydeck==0.9.1
+pyparsing==3.2.3
+pyspark==3.5.6
+python-dateutil==2.9.0.post0
+pytz==2025.2
+PyYAML==6.0.2
+referencing==0.36.2
+requests==2.32.4
+rpds-py==0.26.0
+rsa==4.9.1
+scikit-learn==1.7.1
+scipy==1.16.1
+seaborn==0.13.2
+six==1.17.0
+smmap==5.0.2
+SQLAlchemy==2.0.42
+streamlit==1.47.1
+synapseml==1.0.12
+tenacity==9.1.2
+threadpoolctl==3.6.0
+toml==0.10.2
+tornado==6.5.1
+tqdm==4.67.1
+typing_extensions==4.14.1
+tzdata==2025.2
+urllib3==2.5.0
+xgboost==3.0.3
+xlsxwriter==3.2.5

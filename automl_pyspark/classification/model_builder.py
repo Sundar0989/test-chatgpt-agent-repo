@@ -50,21 +50,12 @@ def gradientBoosting_model(train, x, y):
     strike a balance between performance and resource usage.  A smaller
     maxBins value further reduces memory consumption during tree building.
     """
-    # Apply gradient boosting specific optimisations to reduce broadcasting warnings
-    from pyspark.sql import SparkSession
-    spark = SparkSession.getActiveSession()
-    if spark:
-        try:
-            import sys
-            import os
-            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
-            from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
-            apply_gradient_boosting_optimizations(spark)
-        except Exception as e:
-            # Fall back silently if optimisation module is unavailable
-            print(f"⚠️ Could not apply gradient boosting optimisations: {e}")
+    # Apply gradient boosting optimizations to reduce large task binary warnings
+    try:
+        from spark_optimization_config import apply_gradient_boosting_optimizations
+        apply_gradient_boosting_optimizations(spark)
+    except Exception as e:
+        print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
     
     # Use reduced complexity settings compared to the previous implementation
     gb = GBTClassifier(
@@ -83,7 +74,15 @@ def decisionTree_model(train, x, y):
     return dtModel
 
 def neuralNetwork_model(train, x, y, feature_count, num_classes):
-    layers = [feature_count, feature_count*3, feature_count*2, num_classes]
+    # Use more conservative layer sizes to avoid issues
+    if feature_count <= 10:
+        layers = [feature_count, 8, num_classes]
+    elif feature_count <= 20:
+        layers = [feature_count, 16, num_classes]
+    else:
+        layers = [feature_count, 32, num_classes]
+    
+    print(f"🧠 Neural network architecture: {layers}")
     mlp = MultilayerPerceptronClassifier(featuresCol = x, labelCol = y, maxIter=100, layers=layers, blockSize=512, seed=12345)
     mlpModel = mlp.fit(train)
     return mlpModel
@@ -301,19 +300,12 @@ class ModelBuilder:
             )
             return rf.fit(train_data)
         elif model_type == 'gradient_boosting':
-            # Apply gradient boosting optimisations
-            from pyspark.sql import SparkSession
-            spark = SparkSession.getActiveSession()
-            if spark:
-                try:
-                    import sys, os
-                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
-                    apply_gradient_boosting_optimizations(spark)
-                except Exception:
-                    pass
+            # Apply gradient boosting optimizations to reduce large task binary warnings
+            try:
+                from spark_optimization_config import apply_gradient_boosting_optimizations
+                apply_gradient_boosting_optimizations(self.spark)
+            except Exception as e:
+                print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
             gb = GBTClassifier(
                 featuresCol=features_col,
                 labelCol=label_col,
@@ -340,9 +332,52 @@ class ModelBuilder:
             # For MLP, use feature_count and num_classes from original params
             feature_count = all_params.get('feature_count')
             layers = hyperparams.get('layers')
+            
             # If specific layers are provided (list of ints), use them; otherwise derive from feature_count
-            if layers is None and feature_count:
-                layers = [feature_count, feature_count*3, feature_count*2, num_classes]
+            if layers is None:
+                if feature_count:
+                    layers = [feature_count, feature_count*2, num_classes]
+                else:
+                    # Calculate feature count from training data if not provided
+                    try:
+                        # Get the first row to determine feature vector size
+                        sample_row = train_data.select(features_col).first()
+                        if sample_row and hasattr(sample_row[0], 'size'):
+                            feature_count = sample_row[0].size
+                            layers = [feature_count, feature_count*2, num_classes]
+                        else:
+                            # Fallback to a reasonable default
+                            layers = [50, 25, num_classes]
+                    except Exception as e:
+                        print(f"   ⚠️ Could not determine feature count from data: {e}")
+                        # Fallback to a reasonable default
+                        layers = [50, 25, num_classes]
+                print(f"   🔧 Using default layers: {layers}")
+            else:
+                # Layers were provided - ensure they are compatible with input size
+                if feature_count and layers and len(layers) > 0:
+                    # Validate that first hidden layer is not larger than input size
+                    first_hidden_size = layers[0]
+                    if first_hidden_size > feature_count:
+                        print(f"   ⚠️ Neural network first hidden layer size ({first_hidden_size}) > input size ({feature_count})")
+                        print(f"   🔧 Adjusting to use compatible layer size: {feature_count}")
+                        layers[0] = feature_count
+                
+                # Build complete layer architecture: [input_size, hidden_layers..., output_size]
+                complete_layers = [feature_count] + layers + [num_classes]
+                print(f"   🧠 Neural network architecture: {complete_layers}")
+                
+                mlp = MultilayerPerceptronClassifier(
+                    featuresCol=features_col,
+                    labelCol=label_col,
+                    layers=complete_layers,
+                    maxIter=hyperparams.get('maxIter', 100),
+                    blockSize=hyperparams.get('blockSize', 512),
+                    seed=42
+                )
+                return mlp.fit(train_data)
+            
+            # Fallback for when layers is None (use the old logic)
             mlp = MultilayerPerceptronClassifier(
                 featuresCol=features_col,
                 labelCol=label_col,
@@ -439,19 +474,12 @@ class ModelBuilder:
                 seed=42
             )
         elif model_type == 'gradient_boosting':
-            # Apply gradient boosting optimisations
-            from pyspark.sql import SparkSession
-            spark = SparkSession.getActiveSession()
-            if spark:
-                try:
-                    import sys, os
-                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from spark_optimization_config import apply_gradient_boosting_optimizations  # type: ignore
-                    apply_gradient_boosting_optimizations(spark)
-                except Exception:
-                    pass
+            # Apply gradient boosting optimizations to reduce large task binary warnings
+            try:
+                from spark_optimization_config import apply_gradient_boosting_optimizations
+                apply_gradient_boosting_optimizations(self.spark)
+            except Exception as e:
+                print(f"⚠️ Could not apply gradient boosting optimizations: {e}")
             estimator = GBTClassifier(
                 featuresCol=features_col,
                 labelCol=label_col,

@@ -87,10 +87,12 @@ class ConfigManager:
                 # Update XGBoost availability
                 if models.get('run_xgboost') == 'auto':
                     models['run_xgboost'] = xgboost_available
+                    print(f"✅ Set run_xgboost to {xgboost_available} for {task_type}")
                 
                 # Update LightGBM availability
                 if models.get('run_lightgbm') == 'auto':
                     models['run_lightgbm'] = lightgbm_available
+                    print(f"✅ Set run_lightgbm to {lightgbm_available} for {task_type}")
     
     def _apply_environment_config(self):
         """Apply environment-specific configuration overrides."""
@@ -213,7 +215,11 @@ class ConfigManager:
                 },
                 'feature_selection': {
                     'max_features': 50,
-                    'sequential_threshold': 200
+                    'sequential_threshold': 200,
+                    'enable_rf_feature_selection': True,
+                    'min_size_for_rf_selection': 'medium',  # 'small', 'medium', 'large'
+                    'rf_max_features': 50,
+                    'rf_importance_threshold': 0.01
                 }
             },
             'classification': {
