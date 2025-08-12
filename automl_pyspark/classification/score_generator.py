@@ -282,6 +282,7 @@ class {class_name}:
         """Create PySpark session with optimized configuration for large datasets."""
         return SparkSession.builder \
             .appName("{display_name}_Scoring") \
+            .config("spark.driver.bindAddress", "127.0.0.1") \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
             .config("spark.sql.adaptive.skewJoin.enabled", "true") \
@@ -580,21 +581,22 @@ class {class_name}:
     
     def get_spark_session(self):
         """Get or create Spark session with optimized configuration."""
-        return SparkSession.builder \\
-            .appName("{class_name}") \\
-            .config("spark.sql.adaptive.enabled", "true") \\
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \\
-            .config("spark.sql.adaptive.skewJoin.enabled", "true") \\
-            .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \\
-            .config("spark.driver.memory", "4g") \\
-            .config("spark.driver.maxResultSize", "2g") \\
-            .config("spark.sql.execution.arrow.pyspark.enabled", "true") \\
-            .config("spark.sql.adaptive.coalescePartitions.minPartitionSize", "1MB") \\
-            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128MB") \\
-            .config("spark.network.timeout", "800s") \\
-            .config("spark.rpc.askTimeout", "600s") \\
-            .config("spark.sql.broadcastTimeout", "36000") \\
-            .config("spark.rpc.message.maxSize", "512") \\
+        return SparkSession.builder \
+            .appName("{class_name}") \
+            .config("spark.driver.bindAddress", "127.0.0.1") \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "true") \
+            .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+            .config("spark.driver.memory", "4g") \
+            .config("spark.driver.maxResultSize", "2g") \
+            .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.minPartitionSize", "1MB") \
+            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128MB") \
+            .config("spark.network.timeout", "800s") \
+            .config("spark.rpc.askTimeout", "600s") \
+            .config("spark.sql.broadcastTimeout", "36000") \
+            .config("spark.rpc.message.maxSize", "512") \
             .getOrCreate()
     
     def load_model(self):

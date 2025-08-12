@@ -128,11 +128,35 @@ class RegressionHyperparameterTuner:
         n_trials = config.get('optuna_trials', 50)
         timeout = config.get('optuna_timeout', 300)
         
+        # Ultra-aggressive limits for tree-based models to prevent broadcast escalation
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            n_trials = min(n_trials, 3)   # Ultra-conservative: only 3 trials max
+            timeout = min(timeout, 120)   # 2 minutes max timeout
+            print(f"   🌳 Tree-based model optimization: {n_trials} trials, {timeout}s timeout (ultra-conservative)")
+        
+        # Conservative limits for decision trees
+        if model_type.lower() == 'decision_tree':
+            n_trials = min(n_trials, 5)   # Conservative: only 5 trials max
+            timeout = min(timeout, 180)   # 3 minutes max timeout
+            print(f"   🌲 Decision tree optimization: {n_trials} trials, {timeout}s timeout (conservative)")
+        
+        # Reduce trials and timeout for neural networks to prevent hanging
+        if model_type.lower() == 'neural_network':
+            n_trials = min(n_trials, 20)  # Limit neural network trials
+            timeout = min(timeout, 180)   # Limit neural network timeout
+            print(f"   🧠 Neural network optimization: {n_trials} trials, {timeout}s timeout")
+        
         # Apply Spark optimizations specifically for hyperparameter tuning
         try:
-            from spark_optimization_config import optimize_for_hyperparameter_tuning
-            print(f"   ⚡ Applying Spark optimizations for {model_type} hyperparameter tuning...")
-            optimize_for_hyperparameter_tuning(self.spark, model_type, n_trials)
+            from spark_optimization_config import optimize_for_hyperparameter_tuning, optimize_for_tree_based_tuning
+            
+            # Use tree-specific optimizations for tree-based models
+            if model_type.lower() in ['random_forest', 'decision_tree', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                print(f"   ⚡ Applying tree-based optimizations for {model_type} hyperparameter tuning...")
+                optimize_for_tree_based_tuning(self.spark, model_type, n_trials)
+            else:
+                print(f"   ⚡ Applying general optimizations for {model_type} hyperparameter tuning...")
+                optimize_for_hyperparameter_tuning(self.spark, model_type, n_trials)
         except Exception as e:
             print(f"   ⚠️  Could not apply tuning optimizations: {e}")
         
@@ -144,6 +168,12 @@ class RegressionHyperparameterTuner:
         # Track trial count for cleanup
         trial_counter = {'count': 0}
         
+        # Add global timeout protection
+        optimization_start_time = time.time()
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            max_optimization_time = 180  # 3 minutes max for tree-based models
+        
         # Create Optuna study
         study = optuna.create_study(
             direction='minimize',  # Minimize RMSE for regression
@@ -152,35 +182,75 @@ class RegressionHyperparameterTuner:
         
         # Define objective function
         def objective(trial):
+            # Check global timeout
+            if time.time() - optimization_start_time > max_optimization_time:
+                print(f"    ⏰ Global optimization timeout reached ({max_optimization_time}s)")
+                return 1000.0  # Return high RMSE to stop optimization
+            
             trial_counter['count'] += 1
             current_trial = trial_counter['count']
             
-            params = self._suggest_optuna_params(trial, model_type)
-            score = self._evaluate_params(model_type, params, train_data, target_column)
-            
-            # Enhanced cleanup every 3 trials for tree-based models, 5 for others
-            cleanup_interval = 3 if model_type in ['gradient_boosting', 'random_forest'] else 5
-            
-            if current_trial % cleanup_interval == 0:
+            # Force memory cleanup between trials to prevent memory accumulation
+            if trial_counter['count'] > 1:  # Skip first trial
                 try:
-                    # Force garbage collection hint to Spark
+                    import gc
+                    gc.collect()  # Force Python garbage collection
+                    
+                    # Force Spark garbage collection
                     if hasattr(self.spark, 'sparkContext'):
                         self.spark.sparkContext._jvm.System.gc()
                     
-                    # Additional cleanup for tree-based models
-                    if model_type in ['gradient_boosting', 'random_forest']:
-                        # Clear any cached DataFrames
-                        train_data.unpersist()
-                        import gc
-                        gc.collect()
-                        time.sleep(1.5)  # Longer pause for tree models
+                    # Clear Spark cache if available
+                    try:
+                        self.spark.catalog.clearCache()
+                    except:
+                        pass
                     
-                    print(f"   🧹 Enhanced cleanup after trial {current_trial} (interval: {cleanup_interval})")
-                    time.sleep(1)  # Brief pause for GC
-                except:
-                    pass
+                    print(f"   🧹 Memory cleanup after trial {trial_counter['count'] - 1}")
+                    
+                    # Brief pause to allow cleanup
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"   ⚠️ Memory cleanup failed: {e}")
             
-            return score
+            try:
+                params = self._suggest_optuna_params(trial, model_type)
+                score = self._evaluate_params(model_type, params, train_data, target_column)
+                
+                # Check for broadcast warning escalation and terminate early if detected
+                if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                    # If we've had 2 successful trials, stop early to prevent escalation
+                    if trial_counter['count'] >= 2:
+                        print(f"    🛑 Early termination: {trial_counter['count']} successful trials completed for tree-based model")
+                        print(f"    💡 This prevents broadcast warning escalation")
+                        return 0.5  # Return neutral score to stop optimization
+                
+                # Enhanced cleanup every 3 trials for tree-based models, 5 for others
+                cleanup_interval = 3 if model_type in ['gradient_boosting', 'random_forest'] else 5
+                
+                if current_trial % cleanup_interval == 0:
+                    try:
+                        # Force garbage collection hint to Spark
+                        if hasattr(self.spark, 'sparkContext'):
+                            self.spark.sparkContext._jvm.System.gc()
+                        
+                        # Additional cleanup for tree-based models
+                        if model_type in ['gradient_boosting', 'random_forest']:
+                            # Clear any cached DataFrames
+                            train_data.unpersist()
+                            import gc
+                            gc.collect()
+                            time.sleep(1.5)  # Longer pause for tree models
+                        
+                        print(f"   🧹 Enhanced cleanup after trial {current_trial} (interval: {cleanup_interval})")
+                        time.sleep(1)  # Brief pause for GC
+                    except:
+                        pass
+                
+                return score
+            except Exception as e:
+                print(f"     ⚠️  Error evaluating parameters: {str(e)[:100]}...")
+                return float('inf')  # Return worst possible score
         
         # Run optimization
         try:
@@ -216,9 +286,34 @@ class RegressionHyperparameterTuner:
         n_trials = config.get('random_trials', config.get('random_search_trials', 20))
         param_space = self._get_param_space(model_type)
         
+        # Ultra-aggressive limits for tree-based models to prevent broadcast escalation
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            n_trials = min(n_trials, 3)   # Ultra-conservative: only 3 trials max
+            print(f"   🌳 Tree-based model optimization: {n_trials} trials (ultra-conservative)")
+        
+        # Conservative limits for decision trees
+        if model_type.lower() == 'decision_tree':
+            n_trials = min(n_trials, 5)   # Conservative: only 5 trials max
+            print(f"   🌲 Decision tree optimization: {n_trials} trials (conservative)")
+        
+        # Reduce trials for neural networks to prevent hanging
+        if model_type.lower() == 'neural_network':
+            n_trials = min(n_trials, 20)  # Limit neural network trials
+            print(f"   🧠 Neural network optimization: {n_trials} trials")
+        
         best_params = None
         best_score = float('inf')
         all_results = []
+        successful_trials = 0
+        
+        start_time = time.time()
+        trial_count = 0
+        
+        # Add global timeout protection for tree-based models
+        max_optimization_time = 300  # 5 minutes max for entire optimization
+        if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+            max_optimization_time = 180  # 3 minutes max for tree-based models
+            print(f"   ⏰ Global timeout set to {max_optimization_time}s for tree-based model")
         
         # Chunk trials to reduce memory pressure and broadcasting warnings
         chunk_size = 5  # Process 5 trials at a time
@@ -232,6 +327,32 @@ class RegressionHyperparameterTuner:
             chunk_results = []
             
             for trial in trial_chunk:
+                # Check global timeout
+                if time.time() - start_time > max_optimization_time:
+                    print(f"⏰ Global optimization timeout reached after {trial} trials")
+                    break
+                
+                # Force memory cleanup between trials for tree-based models
+                if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm'] and trial > 0:
+                    try:
+                        import gc
+                        gc.collect()  # Force Python garbage collection
+                        
+                        # Force Spark garbage collection
+                        if hasattr(self.spark, 'sparkContext'):
+                            self.spark.sparkContext._jvm.System.gc()
+                        
+                        # Clear Spark cache if available
+                        try:
+                            self.spark.catalog.clearCache()
+                        except:
+                            pass
+                        
+                        print(f"    🧹 Memory cleanup before trial {trial + 1}")
+                        time.sleep(0.5)  # Brief pause for cleanup
+                    except Exception as e:
+                        print(f"    ⚠️ Memory cleanup failed: {e}")
+                
                 # Sample random parameters
                 params = {}
                 for param_name, param_range in param_space.items():
@@ -246,12 +367,21 @@ class RegressionHyperparameterTuner:
                 # Evaluate parameters
                 score = self._evaluate_params(model_type, params, train_data, target_column)
                 chunk_results.append({'params': params, 'score': score})
+                successful_trials += 1
                 
                 if score < best_score:
                     best_score = score
                     best_params = params.copy()
                 
                 print(f"     Trial {trial + 1}/{n_trials}: RMSE = {score:.4f}")
+                
+                # Check for broadcast warning escalation and terminate early if detected
+                if model_type.lower() in ['random_forest', 'gradient_boosting', 'xgboost', 'lightgbm']:
+                    # If we've had 2 successful trials, stop early to prevent escalation
+                    if successful_trials >= 2:
+                        print(f"    🛑 Early termination: {successful_trials} successful trials completed for tree-based model")
+                        print(f"    💡 This prevents broadcast warning escalation")
+                        break
             
             # Add chunk results to overall results
             all_results.extend(chunk_results)
@@ -362,43 +492,43 @@ class RegressionHyperparameterTuner:
         
         elif model_type == 'random_forest':
             return {
-                'numTrees': trial.suggest_int('numTrees', 10, 200),
-                'maxDepth': trial.suggest_int('maxDepth', 3, 20),
-                'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 1, 10),
-                'subsamplingRate': trial.suggest_float('subsamplingRate', 0.5, 1.0)
+                'numTrees': trial.suggest_int('numTrees', 5, 10),           # Further reduced from (10, 200)
+                'maxDepth': trial.suggest_int('maxDepth', 3, 5),             # Further reduced from (3, 20)
+                'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 1, 2),  # Further reduced from (1, 10)
+                'subsamplingRate': trial.suggest_float('subsamplingRate', 0.8, 1.0)     # Further reduced from (0.5, 1.0)
             }
         
         elif model_type == 'gradient_boosting':
             return {
-                'maxIter': trial.suggest_int('maxIter', 50, 200),
-                'maxDepth': trial.suggest_int('maxDepth', 3, 15),
-                'stepSize': trial.suggest_float('stepSize', 0.01, 0.3),
-                'subsamplingRate': trial.suggest_float('subsamplingRate', 0.5, 1.0)
+                'maxIter': trial.suggest_int('maxIter', 5, 10),             # Further reduced from (50, 200)
+                'maxDepth': trial.suggest_int('maxDepth', 3, 5),             # Further reduced from (3, 15)
+                'stepSize': trial.suggest_float('stepSize', 0.1),            # Further reduced from (0.01, 0.3)
+                'subsamplingRate': trial.suggest_float('subsamplingRate', 0.8, 1.0)     # Further reduced from (0.5, 1.0)
             }
         
         elif model_type == 'decision_tree':
             return {
-                'maxDepth': trial.suggest_int('maxDepth', 3, 20),
-                'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 1, 10),
-                'minInfoGain': trial.suggest_float('minInfoGain', 0.0, 0.1)
+                'maxDepth': trial.suggest_int('maxDepth', 3, 5),             # Further reduced from (3, 20)
+                'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 1, 2),  # Further reduced from (1, 10)
+                'minInfoGain': trial.suggest_float('minInfoGain', 0.0, 0.01) # Further reduced from (0.0, 0.1)
             }
         
         elif model_type == 'xgboost' and XGBOOST_AVAILABLE:
             return {
-                'max_depth': trial.suggest_int('max_depth', 3, 15),
-                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0)
+                'max_depth': trial.suggest_int('max_depth', 3, 5),           # Further reduced from (3, 15)
+                'n_estimators': trial.suggest_int('n_estimators', 20, 30),   # Further reduced from (50, 300)
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),  # Further reduced from (0.01, 0.3)
+                'subsample': trial.suggest_float('subsample', 0.8, 1.0),     # Further reduced from (0.5, 1.0)
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.8, 1.0)  # Further reduced from (0.5, 1.0)
             }
         
         elif model_type == 'lightgbm' and LIGHTGBM_AVAILABLE:
             return {
-                'numLeaves': trial.suggest_int('numLeaves', 10, 100),
-                'numIterations': trial.suggest_int('numIterations', 50, 300),
-                'learningRate': trial.suggest_float('learningRate', 0.01, 0.3, log=True),
-                'featureFraction': trial.suggest_float('featureFraction', 0.5, 1.0),
-                'baggingFraction': trial.suggest_float('baggingFraction', 0.5, 1.0)
+                'numLeaves': trial.suggest_int('numLeaves', 5, 15),          # Further reduced from (10, 100)
+                'numIterations': trial.suggest_int('numIterations', 20, 30), # Further reduced from (50, 300)
+                'learningRate': trial.suggest_float('learningRate', 0.01, 0.1, log=True),  # Further reduced from (0.01, 0.3)
+                'featureFraction': trial.suggest_float('featureFraction', 0.8, 1.0),      # Further reduced from (0.5, 1.0)
+                'baggingFraction': trial.suggest_float('baggingFraction', 0.8, 1.0)       # Further reduced from (0.5, 1.0)
             }
         
         else:
@@ -427,23 +557,39 @@ class RegressionHyperparameterTuner:
                 }
             elif model_type == 'random_forest':
                 return {
-                    'numTrees': [50, 100, 150],
-                    'maxDepth': [5, 10, 15],
-                    'minInstancesPerNode': [1, 5]
+                    'numTrees': [5, 10],            # Further reduced from [50, 100, 150]
+                    'maxDepth': [3, 5],              # Further reduced from [5, 10, 15]
+                    'minInstancesPerNode': [1, 2]    # Further reduced from [1, 5]
                 }
             elif model_type == 'gradient_boosting':
                 # Restrict gradient boosting grid search to modest values to avoid
                 # excessive memory usage and large broadcasted tasks
                 return {
-                    'maxIter': [20, 40, 60],
-                    'maxDepth': [3, 5, 7],
-                    'stepSize': [0.05, 0.1, 0.2],
-                    'maxBins': [32, 48, 64]
+                    'maxIter': [5, 10],       # Further reduced from [20, 40, 60]
+                    'maxDepth': [3, 5],       # Further reduced from [3, 5, 7]
+                    'stepSize': [0.1],        # Further reduced from [0.05, 0.1, 0.2]
+                    'maxBins': [32, 64]       # Further reduced from [32, 48, 64]
                 }
             elif model_type == 'decision_tree':
                 return {
-                    'maxDepth': [5, 10, 15],
-                    'minInstancesPerNode': [1, 5, 10]
+                    'maxDepth': [3, 5],              # Further reduced from [5, 10, 15]
+                    'minInstancesPerNode': [1, 2]    # Further reduced from [1, 5, 10]
+                }
+            elif model_type == 'xgboost':
+                return {
+                    'max_depth': [3, 5],              # Further reduced from [3, 5, 7]
+                    'n_estimators': [20, 30],         # Further reduced from [30, 50, 75]
+                    'learning_rate': [0.01, 0.1],     # Further reduced from [0.01, 0.05, 0.1]
+                    'subsample': [0.8, 1.0],          # Further reduced from [0.7, 0.8, 1.0]
+                    'colsample_bytree': [0.8, 1.0]    # Further reduced from [0.7, 0.8, 1.0]
+                }
+            elif model_type == 'lightgbm':
+                return {
+                    'numLeaves': [5, 15],             # Further reduced from [5, 15, 31]
+                    'numIterations': [20, 30],        # Further reduced from [30, 50, 75]
+                    'learningRate': [0.01, 0.1],      # Further reduced from [0.01, 0.05, 0.1]
+                    'featureFraction': [0.8, 1.0],    # Further reduced from [0.7, 0.8, 1.0]
+                    'baggingFraction': [0.8, 1.0]     # Further reduced from [0.7, 0.8, 1.0]
                 }
             else:
                 return {}
@@ -457,27 +603,43 @@ class RegressionHyperparameterTuner:
                 }
             elif model_type == 'random_forest':
                 return {
-                    'numTrees': (10, 200),
-                    'maxDepth': (3, 20),
-                    'minInstancesPerNode': (1, 10),
-                    'subsamplingRate': (0.5, 1.0),
-                    'maxBins': (64, 256)  # Minimum 64 to handle high-cardinality categorical features safely
+                    'numTrees': (5, 10),            # Further reduced from (10, 200)
+                    'maxDepth': (3, 5),              # Further reduced from (3, 20)
+                    'minInstancesPerNode': (1, 2),   # Further reduced from (1, 10)
+                    'subsamplingRate': (0.8, 1.0),   # Further reduced from (0.5, 1.0)
+                    'maxBins': (32, 64)              # Further reduced from (64, 256)
                 }
             elif model_type == 'gradient_boosting':
                 # Limit the search space for gradient boosting to mitigate large task binaries
                 return {
-                    'maxIter': (10, 60),
-                    'maxDepth': (3, 8),
-                    'stepSize': (0.05, 0.3),
-                    'subsamplingRate': (0.5, 1.0),
-                    'maxBins': (32, 64)
+                    'maxIter': (5, 10),       # Further reduced from (10, 60)
+                    'maxDepth': (3, 5),       # Further reduced from (3, 8)
+                    'stepSize': (0.1),        # Further reduced from (0.05, 0.3)
+                    'subsamplingRate': (0.8, 1.0),   # Further reduced from (0.5, 1.0)
+                    'maxBins': (32, 64)       # Further reduced from (32, 64)
                 }
             elif model_type == 'decision_tree':
                 return {
-                    'maxDepth': (3, 20),
-                    'minInstancesPerNode': (1, 10),
-                    'minInfoGain': (0.0, 0.1),
-                    'maxBins': (64, 256)  # Minimum 64 to handle high-cardinality categorical features safely
+                    'maxDepth': (3, 5),              # Further reduced from (3, 20)
+                    'minInstancesPerNode': (1, 2),   # Further reduced from (1, 10)
+                    'minInfoGain': (0.0, 0.01),      # Further reduced from (0.0, 0.1)
+                    'maxBins': (32, 64)              # Further reduced from (64, 256)
+                }
+            elif model_type == 'xgboost':
+                return {
+                    'max_depth': (3, 5),              # Further reduced from (3, 15)
+                    'n_estimators': (20, 30),         # Further reduced from (30, 300)
+                    'learning_rate': (0.01, 0.1),     # Further reduced from (0.01, 0.3)
+                    'subsample': (0.8, 1.0),          # Further reduced from (0.5, 1.0)
+                    'colsample_bytree': (0.8, 1.0)    # Further reduced from (0.5, 1.0)
+                }
+            elif model_type == 'lightgbm':
+                return {
+                    'numLeaves': (5, 15),             # Further reduced from (5, 120)
+                    'numIterations': (20, 30),        # Further reduced from (30, 300)
+                    'learningRate': (0.01, 0.1),      # Further reduced from (0.01, 0.3)
+                    'featureFraction': (0.8, 1.0),    # Further reduced from (0.5, 1.0)
+                    'baggingFraction': (0.8, 1.0)     # Further reduced from (0.5, 1.0)
                 }
             else:
                 return {}
@@ -521,15 +683,21 @@ class RegressionHyperparameterTuner:
             return lr.fit(train_data)
         
         elif model_type == 'random_forest':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for random forest")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             rf = RandomForestRegressor(
                 featuresCol='features',
                 labelCol=target_column,
-                numTrees=params.get('numTrees', 100),
-                maxDepth=params.get('maxDepth', 10),
+                numTrees=params.get('numTrees', 20),
+                maxDepth=params.get('maxDepth', 5),
                 minInstancesPerNode=params.get('minInstancesPerNode', 1),
-                subsamplingRate=params.get('subsamplingRate', 1.0),
-                maxBins=params.get('maxBins', 128),  # Default to 128 to safely handle high cardinality
-                seed=42
+                maxBins=params.get('maxBins', 32)
             )
             return rf.fit(train_data)
         
@@ -564,6 +732,14 @@ class RegressionHyperparameterTuner:
             return gbt.fit(train_data)
         
         elif model_type == 'decision_tree':
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for decision tree")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             dt = DecisionTreeRegressor(
                 featuresCol='features',
                 labelCol=target_column,
@@ -575,6 +751,14 @@ class RegressionHyperparameterTuner:
             return dt.fit(train_data)
         
         elif model_type == 'xgboost' and XGBOOST_AVAILABLE:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for XGBoost")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             xgb = SparkXGBRegressor(
                 features_col='features',
                 label_col=target_column,
@@ -589,6 +773,14 @@ class RegressionHyperparameterTuner:
             return xgb.fit(train_data)
         
         elif model_type == 'lightgbm' and LIGHTGBM_AVAILABLE:
+            # Apply tree-based optimizations to reduce broadcast warnings
+            try:
+                from spark_optimization_config import apply_tree_based_optimizations
+                apply_tree_based_optimizations(self.spark)
+                print(f"   ⚡ Applied tree-based optimizations for LightGBM")
+            except Exception as e:
+                print(f"   ⚠️ Could not apply tree-based optimizations: {e}")
+            
             lgb = LightGBMRegressor(
                 featuresCol='features',
                 labelCol=target_column,

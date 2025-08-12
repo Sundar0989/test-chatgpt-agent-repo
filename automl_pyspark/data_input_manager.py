@@ -161,105 +161,139 @@ class DataInputManager:
         tuple
             A tuple of (DataFrame, metadata).
         """
-        project_id = kwargs.get("project_id")
-        row_limit = kwargs.get("row_limit")
-        sample_percent = kwargs.get("sample_percent")
-        where_clause = kwargs.get("where_clause")
-        select_columns = kwargs.get("select_columns")
-        bigquery_options = kwargs.get("bigquery_options", {})
+        import time
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                project_id = kwargs.get("project_id")
+                row_limit = kwargs.get("row_limit")
+                sample_percent = kwargs.get("sample_percent")
+                where_clause = kwargs.get("where_clause")
+                select_columns = kwargs.get("select_columns")
+                bigquery_options = kwargs.get("bigquery_options", {})
 
-        # Attempt to derive project ID from the table reference if not provided
-        if not project_id:
-            parts = table_reference.split(".")
-            if len(parts) == 3:
-                project_id = parts[0]
-            else:
-                raise ValueError(
-                    "A BigQuery project_id is required when table_reference"
-                    " does not include it."
+                # Clean project_id if it contains backticks
+                if project_id:
+                    project_id = project_id.strip('`')
+
+                # Attempt to derive project ID from the table reference if not provided
+                if not project_id:
+                    parts = table_reference.split(".")
+                    if len(parts) == 3:
+                        project_id = parts[0]
+                    else:
+                        raise ValueError(
+                            "A BigQuery project_id is required when table_reference"
+                            " does not include it."
+                        )
+
+                # Build SELECT clause
+                if select_columns:
+                    select_part = select_columns
+                else:
+                    select_part = "*"
+
+                # Start constructing the SQL query
+                # Use backticks around the table to support names with dashes
+                # Remove any existing backticks from table_reference to avoid double wrapping
+                clean_table_ref = table_reference.strip('`')
+                sql = f"SELECT {select_part} FROM `{clean_table_ref}`"
+
+                # Apply table sampling if provided
+                if sample_percent:
+                    # BigQuery TABLESAMPLE supports system sampling percentages
+                    sql += f" TABLESAMPLE SYSTEM ({float(sample_percent)} PERCENT)"
+
+                # Apply WHERE clause if provided
+                if where_clause:
+                    sql += f" WHERE {where_clause}"
+
+                # Apply row limit at the end of the query
+                if row_limit:
+                    sql += f" LIMIT {int(row_limit)}"
+
+                # Determine the dataset ID for the connector.  BigQuery's Spark
+                # connector requires a dataset to be specified when using the
+                # ``query`` option.  Extract it from the table reference (which
+                # may be ``project.dataset.table`` or ``dataset.table``).
+                # Clean table_reference first to remove any backticks
+                clean_table_ref = table_reference.strip('`')
+                table_parts = clean_table_ref.split(".")
+                # Initialise dataset_id to avoid NameError if parsing fails
+                dataset_id: Optional[str] = None
+                if len(table_parts) == 3:
+                    # format: project.dataset.table
+                    _, dataset_id, _ = table_parts
+                elif len(table_parts) == 2:
+                    # format: dataset.table; project_id must be provided separately
+                    dataset_id, _ = table_parts
+                # After parsing, ensure dataset_id is set
+                if not dataset_id:
+                    raise ValueError(
+                        f"Unable to determine dataset from table_reference '{table_reference}'."
+                    )
+
+                # Configure the reader with retry logic
+                reader = (
+                    self.spark.read.format("bigquery")
+                    .option("parentProject", project_id)
+                    .option("dataset", dataset_id)
+                    .option("viewsEnabled", "true")
+                    .option("useAvroLogicalTypes", "true")
+                    .option("query", sql)
+                    .option("materializationDataset", dataset_id)
+                    .option("materializationProject", project_id)
                 )
 
-        # Build SELECT clause
-        if select_columns:
-            select_part = select_columns
-        else:
-            select_part = "*"
+                # When using query with the BigQuery connector, materialization
+                # options specify where the temporary table for the query
+                # execution will live.  Without these, queries against large
+                # tables can fail if the default dataset is not available.
+                reader = reader.option("materializationDataset", dataset_id)
+                reader = reader.option("materializationProject", project_id)
 
-        # Start constructing the SQL query
-        # Use backticks around the table to support names with dashes
-        sql = f"SELECT {select_part} FROM `{table_reference}`"
+                # Apply any additional BigQuery connector options
+                for key, value in bigquery_options.items():
+                    reader = reader.option(key, value)
 
-        # Apply table sampling if provided
-        if sample_percent:
-            # BigQuery TABLESAMPLE supports system sampling percentages
-            sql += f" TABLESAMPLE SYSTEM ({float(sample_percent)} PERCENT)"
+                # Load the DataFrame
+                df = reader.load()
 
-        # Apply WHERE clause if provided
-        if where_clause:
-            sql += f" WHERE {where_clause}"
-
-        # Apply row limit at the end of the query
-        if row_limit:
-            sql += f" LIMIT {int(row_limit)}"
-
-        # Determine the dataset ID for the connector.  BigQuery's Spark
-        # connector requires a dataset to be specified when using the
-        # ``query`` option.  Extract it from the table reference (which
-        # may be ``project.dataset.table`` or ``dataset.table``).
-        table_parts = table_reference.split(".")
-        # Initialise dataset_id to avoid NameError if parsing fails
-        dataset_id: Optional[str] = None
-        if len(table_parts) == 3:
-            # format: project.dataset.table
-            _, dataset_id, _ = table_parts
-        elif len(table_parts) == 2:
-            # format: dataset.table; project_id must be provided separately
-            dataset_id, _ = table_parts
-        # After parsing, ensure dataset_id is set
-        if not dataset_id:
-            raise ValueError(
-                f"Unable to determine dataset from table_reference '{table_reference}'."
-            )
-
-        # Configure the reader
-        reader = (
-            self.spark.read.format("bigquery")
-            .option("parentProject", project_id)
-            .option("dataset", dataset_id)
-            .option("viewsEnabled", "true")
-            .option("useAvroLogicalTypes", "true")
-            .option("query", sql)
-        )
-
-        # When using query with the BigQuery connector, materialization
-        # options specify where the temporary table for the query
-        # execution will live.  Without these, queries against large
-        # tables can fail if the default dataset is not available.
-        reader = reader.option("materializationDataset", dataset_id)
-        reader = reader.option("materializationProject", project_id)
-
-        # Apply any additional BigQuery connector options
-        for key, value in bigquery_options.items():
-            reader = reader.option(key, value)
-
-        # Load the DataFrame
-        df = reader.load()
-
-        # Gather metadata
-        try:
-            row_count = df.count()
-        except Exception:
-            row_count = -1  # Unknown for very large tables
-        col_count = len(df.columns)
-        meta: Dict[str, Any] = {
-            "source_type": "bigquery",
-            "table_reference": table_reference,
-            "project_id": project_id,
-            "row_count": row_count,
-            "column_count": col_count,
-            "query": sql,
-        }
-        return df, meta
+                # Gather metadata
+                try:
+                    row_count = df.count()
+                except Exception:
+                    row_count = -1  # Unknown for very large tables
+                col_count = len(df.columns)
+                meta: Dict[str, Any] = {
+                    "source_type": "bigquery",
+                    "table_reference": table_reference,
+                    "project_id": project_id,
+                    "row_count": row_count,
+                    "column_count": col_count,
+                    "query": sql,
+                }
+                return df, meta
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"⚠️ BigQuery data loading attempt {attempt + 1}/{max_retries} failed: {error_msg}")
+                
+                # Check if it's a connector issue
+                if "DATA_SOURCE_NOT_FOUND" in error_msg or "Failed to find the data source: bigquery" in error_msg:
+                    print(f"🔧 Detected BigQuery connector issue - BigQuery connector not properly loaded in Spark session")
+                    print(f"💡 This is a configuration issue - BigQuery connector must be configured before Spark session creation")
+                    print(f"🔄 Retrying with existing session...")
+                
+                if attempt < max_retries - 1:
+                    print(f"⏳ Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print(f"❌ All {max_retries} attempts failed")
+                    raise RuntimeError(f"Failed to load data from BigQuery after {max_retries} attempts. Last error: {error_msg}")
 
     def _load_from_upload(self, file_path: str, **kwargs: Any) -> Tuple[DataFrame, Dict[str, Any]]:
         """Load data from an uploaded file.

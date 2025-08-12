@@ -119,11 +119,10 @@ class AutoMLRegressor:
         # Load configuration first (needed for Spark optimization)
         self.config_manager = ConfigManager(config_path, environment)
         
-        # Initialize Spark session with performance optimization
+        # Use provided Spark session (managed by background job manager)
         if spark_session is None:
-            self.spark = self._create_optimized_spark_session()
-        else:
-            self.spark = spark_session
+            raise ValueError("Spark session must be provided. All Spark sessions are now managed by the background job manager.")
+        self.spark = spark_session
         
         # Store actual parameter values before cleanup
         self.actual_user_id = 'automl_user'
@@ -183,110 +182,14 @@ class AutoMLRegressor:
         self._log_configuration()
     
     def _create_optimized_spark_session(self) -> SparkSession:
-        """Create Spark session with performance optimization."""
-        print("🚀 Creating optimized Spark session for regression...")
-        
-        # Get optimized base configuration with BigQuery support
-        spark_config = get_optimized_spark_config(include_bigquery=True)
-        
-        # Override with BigQuery-optimized memory settings
-        spark_config.update({
-            "spark.driver.memory": "8g",  # Increased for BigQuery operations
-            "spark.driver.maxResultSize": "4g",  # Increased for BigQuery results
-            "spark.executor.memory": "4g",  # Increased for BigQuery processing
-        })
-        
-        # Build Spark session
-        builder = SparkSession.builder.appName("AutoML Regression Pipeline (Optimized)")
-        
-        # Add BigQuery and SynapseML/LightGBM connector packages
-        packages = [
-            "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1",
-            "com.microsoft.azure:synapseml_2.12:1.0.3"
-        ]
-        builder = builder.config("spark.jars.packages", ",".join(packages))
-        
-        for key, value in spark_config.items():
-            builder = builder.config(key, value)
-        
-        return builder.getOrCreate()
+        """DEPRECATED: Spark sessions are now managed by the background job manager."""
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def create_bigquery_spark_session(self, driver_memory: str = "64g", include_lightgbm: bool = True) -> SparkSession:
         """
-        Create a Spark session optimized for BigQuery data loading.
-        Uses the proven working configuration for BigQuery.
-        
-        Args:
-            driver_memory: Driver memory allocation (default: 64g for BigQuery)
-            include_lightgbm: If True, includes SynapseML JARs for LightGBM support
-            
-        Returns:
-            Spark session optimized for BigQuery + AutoML
+        DEPRECATED: Spark sessions are now managed by the background job manager.
         """
-        try:
-            print(f"🚀 Creating BigQuery-optimized Spark session for regression...")
-            print(f"   💾 Driver memory: {driver_memory}")
-            print(f"   🔗 BigQuery connector: v0.36.1")
-            
-            # Stop existing session if needed
-            if hasattr(self, 'spark') and self.spark is not None:
-                print("🔄 Stopping existing Spark session for BigQuery compatibility...")
-                self.spark.stop()
-            
-            # Build Spark session with proven BigQuery configuration
-            builder = SparkSession.builder.appName("AutoML BigQuery Regressor")
-            
-            # Add BigQuery connector package (proven working version)
-            packages = ["com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1"]
-            if include_lightgbm:
-                packages.append("com.microsoft.azure:synapseml_2.12:1.0.3")
-            
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            builder = builder.config("spark.driver.memory", driver_memory)
-            
-            # Apply AutoML optimizations
-            try:
-                base_config = get_optimized_spark_config(include_synapseml=include_lightgbm, include_bigquery=True)
-                
-                # Override with BigQuery-specific settings
-                bigquery_config = {
-                    "spark.driver.memory": driver_memory,
-                    "spark.driver.maxResultSize": "8g",
-                    "spark.executor.memory": "8g",
-                    "spark.sql.execution.arrow.pyspark.enabled": "true",
-                    "spark.sql.execution.arrow.pyspark.fallback.enabled": "true",
-                }
-                
-                # Apply all configurations
-                final_config = {**base_config, **bigquery_config}
-                for key, value in final_config.items():
-                    builder = builder.config(key, value)
-                    
-            except ImportError:
-                print("⚠️ Spark optimization config not available, using basic config")
-            
-            spark = builder.getOrCreate()
-            
-            print(f"✅ BigQuery-optimized Spark session created")
-            if include_lightgbm:
-                print("   🤖 LightGBM support included")
-            
-            # Update our spark reference
-            self.spark = spark
-            
-            # Update component spark references
-            if hasattr(self, 'data_processor'):
-                self.data_processor.spark = spark
-            if hasattr(self, 'model_builder'):
-                self.model_builder.spark = spark
-            if hasattr(self, 'model_validator'):
-                self.model_validator.spark = spark
-            
-            return spark
-            
-        except Exception as e:
-            print(f"❌ Failed to create BigQuery session: {e}")
-            raise
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def load_bigquery_data(self, 
                           project_id: str, 
@@ -535,6 +438,16 @@ class AutoMLRegressor:
         if 'evaluation' in regression_config:
             config.update(regression_config['evaluation'])
         
+        # Add cross-validation settings
+        if 'cross_validation' in regression_config:
+            config.update(regression_config['cross_validation'])
+        else:
+            # Default cross-validation settings
+            config['use_cross_validation'] = 'auto'
+            config['cv_folds'] = 5
+            config['cv_metric_regression'] = 'rmse'
+            config['min_sample_size_for_split'] = 5000
+        
         return config
     
     def _log_configuration(self):
@@ -724,13 +637,25 @@ class AutoMLRegressor:
             print(f"⚠️ Could not get exact row count (large BigQuery dataset): {e}")
             print("🔄 Proceeding with column count only...")
             total_columns = len(train_data.columns)
+            total_rows = None  # Will be estimated later if needed
             print(f"Training data shape: Unknown rows (very large BigQuery dataset), {total_columns} columns")
+        
+        # Store dataset size information for reuse in feature selection
+        self.dataset_info = {
+            'total_rows': total_rows,
+            'total_columns': total_columns,
+            'dataset_size': self._determine_dataset_size_from_counts(total_rows, total_columns)
+        }
+        print(f"📊 Dataset size stored: {self.dataset_info['dataset_size']}")
         
         # Step 1: Data preprocessing and processing
         print("\n📊 Loading and processing data...")
         
         # Create a clean config without target_column to avoid conflicts
         clean_config = {k: v for k, v in self.config.items() if k != 'target_column'}
+        
+        # Add dataset info to the config
+        clean_config['dataset_info'] = self.dataset_info
         
         processed_data = self.data_processor.process_data(
             train_data, target_column, oot1_data, oot2_data, **clean_config
@@ -792,39 +717,99 @@ class AutoMLRegressor:
         
         print(f"🎯 Training models: {models_to_run}")
         
-        # Train models with dual training approach (default + hyperparameter tuned)
-        trained_models = {}
-        for model_type in models_to_run:
-            try:
-                print(f"\n🔧 Training {model_type} model...")
-                
-                # Use dual training approach: default vs hyperparameter-tuned
-                model_result = self._build_model_with_dual_training(
-                    train_df, target_column, model_type, self.selected_vars, datasets, dataset_names
-                )
-                
-                # Store selected model and metrics
-                selected_model = model_result['model']
-                selected_metrics = model_result['metrics']
-                comparison_info = model_result['comparison']
-                
-                # Store metrics with comparison information
-                self.model_metrics[model_type] = selected_metrics
-                self.model_metrics[model_type]['selection_info'] = comparison_info
-                
-                trained_models[model_type] = {
-                    'model': selected_model,
-                    'metrics': selected_metrics
-                }
-                
-                # Note: Both default and tuned models are already saved separately in dual training method
-                # No need to save the selected model again here to avoid redundancy
-                
-                print(f"✅ {model_type} model training completed - selected {comparison_info['decision']} version")
-                
-            except Exception as e:
-                print(f"❌ Error training {model_type}: {str(e)}")
-                continue
+        # 🚀 PERSIST ALL DATASETS ONCE FOR ALL MODELS
+        print("💾 Persisting all datasets once for all model training and hyperparameter tuning...")
+        
+        # Track all datasets that need to be unpersisted
+        datasets_to_unpersist = []
+        
+        try:
+            if not train_df.is_cached:
+                train_df.persist()
+                datasets_to_unpersist.append(('train_df', train_df))
+                print(f"✅ Training data persisted: {train_df.count()} rows")
+            else:
+                print("ℹ️ Training data already persisted")
+        except Exception as e:
+            print(f"⚠️ Could not persist training data: {e}")
+        
+        # Persist validation datasets if they exist
+        for dataset_name, dataset in [('valid_df', valid_df), ('test_df', test_df), 
+                                     ('oot1_df', oot1_df), ('oot2_df', oot2_df)]:
+            if dataset is not None:
+                try:
+                    if not dataset.is_cached:
+                        dataset.persist()
+                        datasets_to_unpersist.append((dataset_name, dataset))
+                        print(f"✅ {dataset_name} persisted: {dataset.count()} rows")
+                    else:
+                        print(f"ℹ️ {dataset_name} already persisted")
+                except Exception as e:
+                    print(f"⚠️ Could not persist {dataset_name}: {e}")
+        
+        try:
+            # Train models with dual training approach (default + hyperparameter tuned)
+            trained_models = {}
+            for model_type in models_to_run:
+                try:
+                    print(f"\n🔧 Training {model_type} model...")
+                    
+                    # Determine whether to use cross-validation or regular training
+                    use_cv = self._should_use_cross_validation(train_df, oot1_df, oot2_df, target_column)
+                    
+                    if use_cv:
+                        # Validate CV metrics configuration
+                        self._validate_cv_metrics()
+                        
+                        # Get CV configuration
+                        cv_folds = self.config.get('cv_folds', 5)
+                        print(f"🔄 Using {cv_folds}-fold cross-validation for {model_type}")
+                        
+                        # Use cross-validation training
+                        model_result = self._build_model_with_dual_training_cv(
+                            train_df, target_column, model_type, self.selected_vars, datasets, dataset_names, cv_folds
+                        )
+                    else:
+                        # Use regular training with train/valid/test split
+                        print(f"📊 Using regular training with train/valid/test split for {model_type}")
+                        
+                        # Use dual training approach: default vs hyperparameter-tuned
+                        model_result = self._build_model_with_dual_training(
+                            train_df, target_column, model_type, self.selected_vars, datasets, dataset_names
+                        )
+                    
+                    # Store selected model and metrics
+                    selected_model = model_result['model']
+                    selected_metrics = model_result['metrics']
+                    comparison_info = model_result['comparison']
+                    
+                    # Store metrics with comparison information
+                    self.model_metrics[model_type] = selected_metrics
+                    self.model_metrics[model_type]['selection_info'] = comparison_info
+                    
+                    trained_models[model_type] = {
+                        'model': selected_model,
+                        'metrics': selected_metrics
+                    }
+                    
+                    # Note: Both default and tuned models are already saved separately in dual training method
+                    # No need to save the selected model again here to avoid redundancy
+                    
+                    print(f"✅ {model_type} model training completed - selected {comparison_info['decision']} version")
+                    
+                except Exception as e:
+                    print(f"❌ Error training {model_type}: {str(e)}")
+                    continue
+        finally:
+            # 🧹 CLEANUP: Unpersist all datasets after ALL models are complete
+            print("🧹 Unpersisting all datasets after all models completed...")
+            for dataset_name, dataset in datasets_to_unpersist:
+                try:
+                    if dataset.is_cached:
+                        dataset.unpersist()
+                        print(f"🧹 {dataset_name} unpersisted")
+                except Exception as e:
+                    print(f"⚠️ Could not unpersist {dataset_name}: {e}")
         
         if not trained_models:
             raise RuntimeError("No models were trained successfully")
@@ -897,6 +882,81 @@ class AutoMLRegressor:
         predictions = self.best_model.transform(processed_data)
         
         return predictions
+    
+    def _should_use_cross_validation(self, train_data: DataFrame, 
+                                   oot1_data: Optional[DataFrame], 
+                                   oot2_data: Optional[DataFrame],
+                                   target_column: str) -> bool:
+        """
+        Determine whether to use cross-validation based on data availability and size.
+        
+        Args:
+            train_data: Training DataFrame
+            oot1_data: Out-of-time validation data 1 (optional)
+            oot2_data: Out-of-time validation data 2 (optional) 
+            target_column: Name of the target column
+            
+        Returns:
+            True if cross-validation should be used, False otherwise
+        """
+        cv_setting = self.config.get('use_cross_validation', 'auto')
+        
+        if cv_setting == 'always':
+            print("✅ Cross-validation enabled: forced by configuration")
+            return True
+        elif cv_setting == 'never':
+            print("❌ Cross-validation disabled: forced by configuration")
+            return False
+        elif cv_setting == 'auto':
+            # Auto-detect based on data availability and size
+            sample_size = train_data.count()
+            min_sample_size = self.config.get('min_sample_size_for_split', 5000)
+            
+            # Check if we have out-of-time validation data
+            has_oot_data = oot1_data is not None or oot2_data is not None
+            
+            # Use cross-validation if:
+            # 1. No out-of-time validation data available, OR
+            # 2. Sample size is too small for reliable train/valid/test split
+            use_cv = not has_oot_data or sample_size < min_sample_size
+            
+            if use_cv:
+                if not has_oot_data:
+                    print(f"✅ Cross-validation enabled: no out-of-time validation data available")
+                else:
+                    print(f"✅ Cross-validation enabled: sample size ({sample_size}) < minimum ({min_sample_size})")
+            else:
+                print(f"❌ Cross-validation disabled: sufficient data for train/valid/test split")
+                
+            return use_cv
+        else:
+            print(f"⚠️ Unknown cross-validation setting: {cv_setting}, defaulting to auto")
+            return self._should_use_cross_validation(train_data, oot1_data, oot2_data, target_column)
+    
+    def _validate_cv_metrics(self):
+        """Validate and provide information about cross-validation metrics for regression."""
+        # Available metrics for regression
+        regression_metrics = ['rmse', 'mse', 'mae', 'r2']
+        
+        # Validate regression metric
+        regression_metric = self.config.get('cv_metric_regression', 'rmse')
+        if regression_metric not in regression_metrics:
+            print(f"⚠️ Warning: Unknown regression CV metric '{regression_metric}'. Available: {regression_metrics}")
+            print(f"Falling back to 'rmse'")
+            self.config['cv_metric_regression'] = 'rmse'
+        
+        # Provide information about metrics
+        print(f"\n📊 Cross-Validation Metrics Configuration:")
+        print(f"  Regression: {self.config['cv_metric_regression']}")
+        
+        if regression_metric == 'rmse':
+            print(f"  📈 RMSE: Root Mean Square Error (lower is better)")
+        elif regression_metric == 'mse':
+            print(f"  📈 MSE: Mean Square Error (lower is better)")
+        elif regression_metric == 'mae':
+            print(f"  📈 MAE: Mean Absolute Error (lower is better)")
+        elif regression_metric == 'r2':
+            print(f"  📈 R²: Coefficient of determination (higher is better)")
     
     def _apply_preprocessing(self, data: DataFrame) -> DataFrame:
         """Apply preprocessing pipeline to new data."""
@@ -1473,24 +1533,48 @@ class AutoMLRegressor:
                 print(f"    ⚠️ No optimization results returned. Using default parameters.")
                 print(f"    🔍 Optimization results: {optimization_results}")
             
-            # Build tuned model
-            tuned_model = self.model_builder.build_model(
-                train_data, 'features', target_column, model_type,
-                num_features=len(top_features),
-                **best_params
-            )
-            
-            # Validate tuned model
-            tuned_metrics = self.model_validator.validate_model(
-                tuned_model, datasets, dataset_names, target_column, f"{model_type}_tuned", self.output_dir
-            )
-            
-            # Compare models and select the better one
-            comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
-            
-            # Log detailed comparison
-            self._log_model_comparison(model_type, comparison_result)
-            
+            # Check if we have valid optimization results
+            if not best_params:
+                print(f"    ⚠️ No valid optimization results for {model_type}. Skipping tuned model build.")
+                print(f"    📊 Using default {model_type} model only.")
+                
+                comparison_result = {
+                    'decision': 'default',
+                    'reasons': ['No valid hyperparameter optimization results - using default model'],
+                    'default_score': self._extract_score(default_metrics, 'rmse')
+                }
+                
+                return {
+                    'model': default_model,
+                    'metrics': default_metrics,
+                    'model_type': f"{model_type}_default",
+                    'comparison': comparison_result,
+                    'default_metrics': default_metrics,
+                    'tuned_metrics': None,
+                    'default_model': default_model,
+                    'tuned_model': None
+                }
+            else:
+                print(f"    🔧 Building tuned {model_type} model with optimized parameters...")
+                
+                # Build tuned model
+                tuned_model = self.model_builder.build_model(
+                    train_data, 'features', target_column, model_type,
+                    num_features=len(top_features),
+                    **best_params
+                )
+                
+                # Validate tuned model
+                tuned_metrics = self.model_validator.validate_model(
+                    tuned_model, datasets, dataset_names, target_column, f"{model_type}_tuned", self.output_dir
+                )
+                
+                # Compare models and select the better one
+                comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
+                
+                # Log detailed comparison
+                self._log_model_comparison(model_type, comparison_result)
+                
         else:
             print(f"  📝 Hyperparameter optimization disabled - using default {model_type} model")
             comparison_result = {
@@ -1565,6 +1649,9 @@ class AutoMLRegressor:
                 
             except Exception as e:
                 print(f"⚠️  Could not apply enhanced tuning optimizations: {e}")
+        
+        # ℹ️ Training data should already be persisted at the model building level
+        # No need to persist/unpersist here since it's handled at the higher level
         
         # Use the hyperparameter tuner for optimization
         return self.hyperparameter_tuner.tune_hyperparameters(
@@ -1728,3 +1815,248 @@ class AutoMLRegressor:
         print(f"   💭 Reasoning:")
         for reason in comparison['reasons']:
             print(f"      • {reason}") 
+
+    def _build_model_with_dual_training_cv(self, cv_data: DataFrame, target_column: str, 
+                                           model_type: str, top_features: List[str],
+                                           datasets: List[DataFrame], dataset_names: List[str],
+                                           cv_folds: int) -> Dict[str, Any]:
+        """
+        Build both default and tuned models using cross-validation, then select the better one.
+        
+        Returns:
+            Dictionary with selected model, metrics, and selection reasoning
+        """
+        from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+        from pyspark.ml.evaluation import RegressionEvaluator
+        
+        print(f"\n🔄 Training both default and tuned {model_type} models with {cv_folds}-fold CV...")
+        
+        # Validate Spark session before proceeding
+        try:
+            self.spark.sparkContext.getConf().get("spark.driver.host")
+            print("✅ Spark session is healthy")
+        except Exception as e:
+            print(f"⚠️ Spark session issue detected: {e}")
+            print("🔄 Attempting to restart Spark session...")
+            if self._restart_spark_session():
+                print("✅ Spark session restarted successfully")
+            else:
+                print("❌ Failed to restart Spark session, proceeding with caution")
+        
+        # Set up evaluator for cross-validation
+        cv_metric = self.config.get('cv_metric_regression', 'rmse')
+        evaluator = RegressionEvaluator(
+            labelCol=target_column, 
+            predictionCol="prediction",
+            metricName=cv_metric
+        )
+        print(f"Using {cv_metric} as cross-validation metric for regression")
+        
+        # Build default model with CV
+        print(f"  📊 Training default {model_type} model with CV...")
+        try:
+            default_estimator = self.model_builder.create_estimator(
+                'features', target_column, model_type,
+                feature_count=len(top_features)
+            )
+            
+            # Create a simple parameter grid for default model (minimal grid)
+            default_param_grid = ParamGridBuilder().build()  # Empty grid - uses default params
+            
+            default_cv = CrossValidator(
+                estimator=default_estimator,
+                estimatorParamMaps=default_param_grid,
+                evaluator=evaluator,
+                numFolds=cv_folds,
+                seed=42
+            )
+            
+            default_cv_model = default_cv.fit(cv_data)
+            default_final_model = default_cv_model.bestModel
+            
+            # Validate default model on all datasets
+            default_metrics = self.model_validator.validate_model(
+                default_final_model, datasets, dataset_names, target_column, f"{model_type}_default", self.output_dir
+            )
+            
+            # Add CV score to metrics
+            default_metrics['cv_score'] = float(default_cv_model.avgMetrics[0])
+            
+            print(f"  ✅ Default {model_type} model trained successfully")
+            print(f"  📊 Default CV {cv_metric}: {default_metrics['cv_score']:.4f}")
+            
+        except Exception as e:
+            print(f"  ❌ Failed to train default {model_type} model: {e}")
+            raise
+        
+        # Initialize variables for tuned model
+        tuned_final_model = None
+        tuned_metrics = None
+        
+        # Build tuned model with CV if hyperparameter optimization is enabled
+        if self.config.get('enable_hyperparameter_tuning', False):
+            print(f"  🎯 Training hyperparameter-tuned {model_type} model with CV...")
+            
+            # Optimize hyperparameters first
+            optimization_results = self._optimize_hyperparameters(
+                cv_data, target_column, model_type, len(top_features)
+            )
+            
+            best_params = {}
+            if optimization_results and 'best_params' in optimization_results:
+                best_params = optimization_results['best_params']
+                print(f"    🔧 Optimized parameters: {best_params}")
+            
+            # Check if we have valid optimization results
+            if not best_params:
+                print(f"    ⚠️ No valid optimization results for {model_type}. Skipping tuned model build.")
+                print(f"    📊 Using default {model_type} model only.")
+                
+                comparison_result = {
+                    'decision': 'default',
+                    'reasons': ['No valid hyperparameter optimization results - using default model'],
+                    'default_score': self._extract_score(default_metrics, 'rmse'),
+                    'default_cv_score': default_metrics['cv_score']
+                }
+                
+                return {
+                    'model': default_final_model,
+                    'metrics': default_metrics,
+                    'model_type': f"{model_type}_default",
+                    'comparison': comparison_result,
+                    'default_metrics': default_metrics,
+                    'tuned_metrics': None
+                }
+            else:
+                print(f"    🔧 Building tuned {model_type} model with optimized parameters...")
+                
+                # Create tuned estimator
+                tuned_estimator = self.model_builder.create_estimator(
+                    'features', target_column, model_type,
+                    feature_count=len(top_features),
+                    **best_params
+                )
+                
+                tuned_param_grid = ParamGridBuilder().build()  # Empty grid - uses optimized params
+                
+                tuned_cv = CrossValidator(
+                    estimator=tuned_estimator,
+                    estimatorParamMaps=tuned_param_grid,
+                    evaluator=evaluator,
+                    numFolds=cv_folds,
+                    seed=42
+                )
+                
+                tuned_cv_model = tuned_cv.fit(cv_data)
+                tuned_final_model = tuned_cv_model.bestModel
+                
+                # Validate tuned model on all datasets
+                tuned_metrics = self.model_validator.validate_model(
+                    tuned_final_model, datasets, dataset_names, target_column, f"{model_type}_tuned", self.output_dir
+                )
+                
+                # Add CV score to metrics
+                tuned_metrics['cv_score'] = float(tuned_cv_model.avgMetrics[0])
+                
+                # Compare models and select the better one
+                comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
+                
+                # Add CV score comparison
+                cv_improvement = tuned_metrics['cv_score'] - default_metrics['cv_score']
+                comparison_result['cv_improvement'] = cv_improvement
+                comparison_result['default_cv_score'] = default_metrics['cv_score']
+                comparison_result['tuned_cv_score'] = tuned_metrics['cv_score']
+                
+                # Log detailed comparison including CV scores
+                self._log_model_comparison_cv(model_type, comparison_result)
+                
+        else:
+            print(f"  📝 Hyperparameter optimization disabled - using default {model_type} model")
+            comparison_result = {
+                'decision': 'default',
+                'reasons': ['Hyperparameter optimization is disabled'],
+                'default_score': self._extract_score(default_metrics, 'rmse'),
+                'default_cv_score': default_metrics['cv_score']
+            }
+        
+        # Select the final model and metrics
+        if comparison_result['decision'] == 'tuned' and tuned_final_model is not None:
+            selected_model = tuned_final_model
+            selected_metrics = tuned_metrics
+            selected_type = f"{model_type}_tuned"
+        else:
+            selected_model = default_final_model
+            selected_metrics = default_metrics
+            selected_type = f"{model_type}_default"
+        
+        return {
+            'model': selected_model,
+            'metrics': selected_metrics,
+            'model_type': selected_type,
+            'comparison': comparison_result,
+            'default_metrics': default_metrics,
+            'tuned_metrics': tuned_metrics
+        }
+    
+    def _log_model_comparison_cv(self, model_type: str, comparison: Dict[str, Any]):
+        """Log detailed model comparison results for cross-validation."""
+        print(f"\n🤔 Cross-Validation Analysis for {model_type.upper()}:")
+        print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']:.4f}")
+        
+        if 'tuned_score' in comparison:
+            print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']:.4f}")
+            print(f"   📊 Performance improvement: {comparison['improvement_pct']:.2f}%")
+            print(f"   🎪 Default overfitting gap: {comparison['default_overfitting']:.3f}")
+            print(f"   🎪 Tuned overfitting gap: {comparison['tuned_overfitting']:.3f}")
+        
+        print(f"   ✅ DECISION: Using {comparison['decision'].upper()} model")
+        print(f"   💭 Reasoning:")
+        for reason in comparison['reasons']:
+            print(f"      • {reason}")
+    
+    def _restart_spark_session(self) -> bool:
+        """Attempt to restart the Spark session if it's in an unhealthy state."""
+        try:
+            # Check if session is already healthy
+            self.spark.sparkContext.getConf().get("spark.driver.host")
+            return True
+        except Exception:
+            try:
+                print("🔄 Attempting to restart Spark session...")
+                
+                # Stop current session
+                self.spark.stop()
+                
+                # Create new session with same configuration
+                self.spark = self._create_optimized_spark_session()
+                
+                # Test the new session
+                self.spark.sparkContext.getConf().get("spark.driver.host")
+                print("✅ Spark session restarted successfully")
+                return True
+                
+            except Exception as e:
+                print(f"❌ Failed to restart Spark session: {e}")
+                return False
+    
+    def _determine_dataset_size_from_counts(self, total_rows: Optional[int], total_columns: int) -> str:
+        """
+        Determine dataset size category based on row and column counts.
+        
+        Args:
+            total_rows: Number of rows (can be None for very large datasets)
+            total_columns: Number of columns
+            
+        Returns:
+            str: 'small', 'medium', or 'large'
+        """
+        if total_rows is None:
+            # For very large BigQuery datasets where we couldn't get exact count
+            return 'large'
+        
+        if total_rows < 10000:
+            return 'small'
+        elif total_rows < 100000:
+            return 'medium'
+        else:
+            return 'large'

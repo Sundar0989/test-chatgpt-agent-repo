@@ -135,11 +135,10 @@ class AutoMLClassifier:
         # Load configuration first (needed for Spark optimization)
         self.config_manager = ConfigManager(config_path, environment)
         
-        # Initialize Spark session with performance optimization
+        # Use provided Spark session (managed by background job manager)
         if spark_session is None:
-            self.spark = self._create_optimized_spark_session()
-        else:
-            self.spark = spark_session
+            raise ValueError("Spark session must be provided. All Spark sessions are now managed by the background job manager.")
+        self.spark = spark_session
         
         # Apply legacy parameter overrides FIRST (lower priority)
         # Store actual parameter values before cleanup
@@ -207,190 +206,20 @@ class AutoMLClassifier:
         self._log_configuration()
     
     def _create_optimized_spark_session(self) -> SparkSession:
-        """Create Spark session with performance optimization based on config."""
-        print("🚀 Creating optimized Spark session with performance settings...")
-        
-        # Stop any existing Spark session to avoid conflicts
-        try:
-            existing_spark = SparkSession.getActiveSession()
-            if existing_spark:
-                print("🔄 Stopping existing Spark session to avoid conflicts...")
-                existing_spark.stop()
-        except Exception as e:
-            print(f"⚠️ Note: {e}")
-        
-        # Get performance configuration
-        perf_config = self.config_manager.config.get('performance', {})
-        parallel_jobs = perf_config.get('parallel_jobs', -1)
-        memory_limit_gb = perf_config.get('memory_limit_gb', 8)
-        
-        print(f"   ⚡ Parallel jobs: {parallel_jobs}")
-        print(f"   💾 Memory limit: {memory_limit_gb}GB")
-        
-        # Get optimized base configuration with BigQuery support
-        spark_config = get_optimized_spark_config(include_synapseml=LIGHTGBM_AVAILABLE, include_bigquery=True)
-        
-        # Override with performance-specific settings optimized for BigQuery
-        spark_config.update({
-            "spark.executor.memory": f"{max(4, memory_limit_gb // 2)}g",
-            "spark.driver.memory": f"{max(8, memory_limit_gb)}g",  # Increased for BigQuery operations
-            "spark.driver.maxResultSize": "4g",  # Increased for BigQuery results
-            "spark.sql.shuffle.partitions": str(max(8, parallel_jobs * 4)) if parallel_jobs > 0 else "200",
-        })
-        
-        # Configure executor cores based on parallel_jobs
-        if parallel_jobs > 0:
-            spark_config["spark.executor.cores"] = str(min(4, parallel_jobs))
-            spark_config["spark.executor.instances"] = str(max(1, parallel_jobs // 4))
-        
-        # Build Spark session
-        builder = SparkSession.builder.appName("AutoML Classification Pipeline (Performance Optimized)")
-        
-        # Add BigQuery connector package - using your proven working configuration
-        packages = ["com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1"]
-        if LIGHTGBM_AVAILABLE:
-            packages.append("com.microsoft.azure:synapseml_2.12:1.0.3")
-        
-        print(f"   📦 Adding packages: {packages}")
-        builder = builder.config("spark.jars.packages", ",".join(packages))
-        
-        for key, value in spark_config.items():
-            builder = builder.config(key, value)
-        
-        print("   🔧 Creating new Spark session with BigQuery support...")
-        spark = builder.getOrCreate()
-        
-        # Verify BigQuery connector is available
-        try:
-            # Test BigQuery connector availability
-            test_packages = spark.sparkContext.getConf().get("spark.jars.packages", "")
-            print(f"   📋 Loaded packages: {test_packages}")
-            if "spark-bigquery-with-dependencies" in test_packages:
-                print("   ✅ BigQuery connector package confirmed")
-            else:
-                print("   ⚠️ BigQuery connector package not found in loaded packages")
-        except Exception as e:
-            print(f"   ⚠️ Could not verify packages: {e}")
-        
-        return spark
+        """DEPRECATED: Spark sessions are now managed by the background job manager."""
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def create_proven_bigquery_session(self, driver_memory: str = "64g") -> SparkSession:
         """
-        Create Spark session using your exact proven working BigQuery configuration.
-        This replicates your working code exactly.
+        DEPRECATED: Spark sessions are now managed by the background job manager.
         """
-        print(f"🚀 Creating Spark session using your proven BigQuery configuration...")
-        print(f"   💾 Driver memory: {driver_memory}")
-        
-        # Stop any existing session first
-        try:
-            existing_spark = SparkSession.getActiveSession()
-            if existing_spark:
-                print("🔄 Stopping existing Spark session...")
-                existing_spark.stop()
-        except Exception as e:
-            pass
-        
-        # Your exact working configuration
-        spark = SparkSession.builder \
-            .appName("AutoML BigQuery (Proven Config)") \
-            .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1") \
-            .config("spark.driver.memory", driver_memory) \
-            .getOrCreate()
-        
-        print("✅ Spark session created with proven BigQuery configuration")
-        
-        # Update our spark reference and component references
-        self.spark = spark
-        if hasattr(self, 'data_processor'):
-            self.data_processor.spark = spark
-        if hasattr(self, 'model_builder'):
-            self.model_builder.spark = spark
-        if hasattr(self, 'model_validator'):
-            self.model_validator.spark = spark
-        if hasattr(self, 'data_balancer'):
-            self.data_balancer.spark = spark
-        
-        return spark
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def create_bigquery_spark_session(self, driver_memory: str = "64g", include_lightgbm: bool = True) -> SparkSession:
         """
-        Create a Spark session optimized for BigQuery data loading.
-        Uses the proven working configuration for BigQuery.
-        
-        Args:
-            driver_memory: Driver memory allocation (default: 64g for BigQuery)
-            include_lightgbm: If True, includes SynapseML JARs for LightGBM support
-            
-        Returns:
-            Spark session optimized for BigQuery + AutoML
+        DEPRECATED: Spark sessions are now managed by the background job manager.
         """
-        try:
-            print(f"🚀 Creating BigQuery-optimized Spark session...")
-            print(f"   💾 Driver memory: {driver_memory}")
-            print(f"   🔗 BigQuery connector: v0.36.1")
-            
-            # Stop existing session if needed
-            if hasattr(self, 'spark') and self.spark is not None:
-                print("🔄 Stopping existing Spark session for BigQuery compatibility...")
-                self.spark.stop()
-            
-            # Build Spark session with proven BigQuery configuration
-            builder = SparkSession.builder.appName("AutoML BigQuery Classifier")
-            
-            # Add BigQuery connector package (proven working version)
-            packages = ["com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1"]
-            if include_lightgbm:
-                packages.append("com.microsoft.azure:synapseml_2.12:1.0.3")
-            
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            builder = builder.config("spark.driver.memory", driver_memory)
-            
-            # Apply AutoML optimizations
-            try:
-                base_config = get_optimized_spark_config(include_synapseml=include_lightgbm, include_bigquery=True)
-                
-                # Override with BigQuery-specific settings
-                bigquery_config = {
-                    "spark.driver.memory": driver_memory,
-                    "spark.driver.maxResultSize": "8g",
-                    "spark.executor.memory": "8g",
-                    "spark.sql.execution.arrow.pyspark.enabled": "true",
-                    "spark.sql.execution.arrow.pyspark.fallback.enabled": "true",
-                }
-                
-                # Apply all configurations
-                final_config = {**base_config, **bigquery_config}
-                for key, value in final_config.items():
-                    builder = builder.config(key, value)
-                    
-            except ImportError:
-                print("⚠️ Spark optimization config not available, using basic config")
-            
-            spark = builder.getOrCreate()
-            
-            print(f"✅ BigQuery-optimized Spark session created")
-            if include_lightgbm:
-                print("   🤖 LightGBM support included")
-            
-            # Update our spark reference
-            self.spark = spark
-            
-            # Update component spark references
-            if hasattr(self, 'data_processor'):
-                self.data_processor.spark = spark
-            if hasattr(self, 'model_builder'):
-                self.model_builder.spark = spark
-            if hasattr(self, 'model_validator'):
-                self.model_validator.spark = spark
-            if hasattr(self, 'data_balancer'):
-                self.data_balancer.spark = spark
-            
-            return spark
-            
-        except Exception as e:
-            print(f"❌ Failed to create BigQuery session: {e}")
-            raise
+        raise NotImplementedError("Spark session creation is now handled by the background job manager. Please provide a spark_session parameter.")
     
     def load_bigquery_data(self, 
                           project_id: str, 
@@ -837,6 +666,14 @@ class AutoMLClassifier:
             total_rows = None  # Will be estimated later if needed
             print(f"Training data shape: Unknown rows (very large BigQuery dataset), {total_columns} columns")
         
+        # Store dataset size information for reuse in feature selection
+        self.dataset_info = {
+            'total_rows': total_rows,
+            'total_columns': total_columns,
+            'dataset_size': self._determine_dataset_size_from_counts(total_rows, total_columns)
+        }
+        print(f"📊 Dataset size stored: {self.dataset_info['dataset_size']}")
+        
         # Detect multiclass - optimized for large BigQuery datasets
         print("🔍 Detecting number of target classes...")
         try:
@@ -1217,54 +1054,129 @@ class AutoMLClassifier:
     
     def _select_features(self, data: DataFrame, target_column: str) -> Tuple[DataFrame, List[str]]:
         """Select the best features for modeling."""
-        # Pass configuration parameters to data processor
-        self.data_processor.sequential_threshold = self.config['sequential_threshold']
-        self.data_processor.chunk_size = self.config['chunk_size']
-        self.data_processor.features_per_chunk = self.config['features_per_chunk']
         
-        # Calculate actual number of features needed (min of available and configured)
-        # Add robust error handling for Py4J connection issues
+        # Import feature selection module
         try:
-            feature_cols = [col for col in data.columns if col != target_column]
-        except Exception as e:
-            print(f"⚠️ Cannot access DataFrame columns due to Py4J error: {e}")
-            print("🔄 Attempting to restart Spark session and retry...")
+            from ..feature_selection import random_forest_feature_selection
+        except ImportError:
+            try:
+                from feature_selection import random_forest_feature_selection
+            except ImportError:
+                # For direct script execution
+                import sys
+                import os
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
+                from feature_selection import random_forest_feature_selection
+        
+        # Use stored dataset information instead of recalculating
+        if hasattr(self, 'dataset_info'):
+            dataset_size = self.dataset_info['dataset_size']
+            total_rows = self.dataset_info['total_rows']
+            total_columns = self.dataset_info['total_columns']
+            print(f"📊 Using stored dataset info: {dataset_size} ({total_rows:,} rows, {total_columns} columns)")
+        else:
+            # Fallback to calculation if dataset_info is not available
+            print("⚠️ Dataset info not available, calculating size...")
+            try:
+                total_rows = data.count()
+                total_columns = len(data.columns)
+                dataset_size = self._determine_dataset_size_from_counts(total_rows, total_columns)
+                print(f"📊 Calculated dataset size: {dataset_size} ({total_rows:,} rows, {total_columns} columns)")
+            except Exception as e:
+                print(f"⚠️ Could not calculate dataset size: {e}")
+                dataset_size = 'medium'  # Default fallback
+                print(f"📊 Using default dataset size: {dataset_size}")
+        
+        # Check if we should use Random Forest feature selection
+        use_rf_selection = self.config.get('enable_rf_feature_selection', True)
+        min_size_for_rf = self.config.get('min_size_for_rf_selection', 'medium')  # 'small', 'medium', 'large'
+        
+        # Define size hierarchy for comparison
+        size_hierarchy = {'small': 1, 'medium': 2, 'large': 3}
+        current_size_level = size_hierarchy.get(dataset_size, 2)
+        min_size_level = size_hierarchy.get(min_size_for_rf, 2)
+        
+        if use_rf_selection and current_size_level >= min_size_level:
+            print(f"🌳 Using Random Forest feature selection for {dataset_size} dataset...")
             
-            # Try to restart Spark session
-            if hasattr(self, '_restart_spark_session'):
-                if self._restart_spark_session():
-                    try:
-                        # Retry with fresh session
-                        feature_cols = [col for col in data.columns if col != target_column]
-                        print("✅ Successfully recovered DataFrame columns after session restart")
-                    except Exception as e2:
-                        print(f"❌ Still cannot access DataFrame columns after session restart: {e2}")
-                        raise RuntimeError(f"Failed to access DataFrame columns after session restart: {e2}")
-                else:
-                    print("❌ Failed to restart Spark session")
-                    raise RuntimeError(f"Failed to restart Spark session: {e}")
-            else:
-                # Fallback: try to get columns from the data processor's cached info
-                print("🔄 Attempting to use cached column information...")
-                try:
-                    # Try to get columns from the data processor if it has cached the schema
-                    if hasattr(self.data_processor, 'last_processed_schema'):
-                        feature_cols = [col for col in self.data_processor.last_processed_schema if col != target_column]
-                        print(f"✅ Using cached schema with {len(feature_cols)} features")
+            # Get RF feature selection parameters from config
+            max_features = self.config.get('rf_max_features', 50)
+            importance_threshold = self.config.get('rf_importance_threshold', 0.01)
+            
+            # Perform Random Forest feature selection
+            filtered_df, selected_features, feature_info = random_forest_feature_selection(
+                df=data,
+                target_column=target_column,
+                problem_type='classification',
+                spark=self.spark,
+                output_dir=self.output_dir,
+                user_id=self.config.get('user_id', 'default_user'),
+                model_literal=self.config.get('model_literal', 'default_model'),
+                max_features=max_features,
+                importance_threshold=importance_threshold
+            )
+            
+            # Store feature selection info for later use
+            self.feature_selection_info = feature_info
+            
+            print(f"✅ Random Forest feature selection completed!")
+            print(f"📊 Selected {len(selected_features)} features out of {feature_info.get('original_features', 'unknown')}")
+            
+            return filtered_df, selected_features
+        else:
+            print(f"📊 Using standard feature selection for {dataset_size} dataset...")
+            
+            # Use the original feature selection logic
+            # Pass configuration parameters to data processor
+            self.data_processor.sequential_threshold = self.config['sequential_threshold']
+            self.data_processor.chunk_size = self.config['chunk_size']
+            self.data_processor.features_per_chunk = self.config['features_per_chunk']
+            
+            # Calculate actual number of features needed (min of available and configured)
+            # Add robust error handling for Py4J connection issues
+            try:
+                feature_cols = [col for col in data.columns if col != target_column]
+            except Exception as e:
+                print(f"⚠️ Cannot access DataFrame columns due to Py4J error: {e}")
+                print("🔄 Attempting to restart Spark session and retry...")
+                
+                # Try to restart Spark session
+                if hasattr(self, '_restart_spark_session'):
+                    if self._restart_spark_session():
+                        try:
+                            # Retry with fresh session
+                            feature_cols = [col for col in data.columns if col != target_column]
+                            print("✅ Successfully recovered DataFrame columns after session restart")
+                        except Exception as e2:
+                            print(f"❌ Still cannot access DataFrame columns after session restart: {e2}")
+                            raise RuntimeError(f"Failed to access DataFrame columns after session restart: {e2}")
                     else:
-                        raise RuntimeError("No cached schema available")
-                except Exception as e3:
-                    print(f"❌ Cannot recover column information: {e3}")
-                    raise RuntimeError(f"Failed to access DataFrame columns and no recovery method available: {e}")
-        
-        actual_max_features = min(self.config['max_features'], len(feature_cols))
-        
-        print(f"📊 Available features: {len(feature_cols)}, Configured max: {self.config['max_features']}")
-        print(f"🎯 Will select: {actual_max_features} features")
-        
-        return self.data_processor.select_features(
-            data, target_column, actual_max_features
-        )
+                        print("❌ Failed to restart Spark session")
+                        raise RuntimeError(f"Failed to restart Spark session: {e}")
+                else:
+                    # Fallback: try to get columns from the data processor's cached info
+                    print("🔄 Attempting to use cached column information...")
+                    try:
+                        # Try to get columns from the data processor if it has cached the schema
+                        if hasattr(self.data_processor, 'last_processed_schema'):
+                            feature_cols = [col for col in self.data_processor.last_processed_schema if col != target_column]
+                            print(f"✅ Using cached schema with {len(feature_cols)} features")
+                        else:
+                            raise RuntimeError("No cached schema available")
+                    except Exception as e3:
+                        print(f"❌ Cannot recover column information: {e3}")
+                        raise RuntimeError(f"Failed to access DataFrame columns and no recovery method available: {e}")
+            
+            actual_max_features = min(self.config['max_features'], len(feature_cols))
+            
+            print(f"📊 Available features: {len(feature_cols)}, Configured max: {self.config['max_features']}")
+            print(f"🎯 Will select: {actual_max_features} features")
+            
+            return self.data_processor.select_features(
+                data, target_column, actual_max_features
+            )
     
     def _split_and_scale_data(self, data: DataFrame, target_column: str) -> Tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
         """Split data and apply scaling."""
@@ -1513,37 +1425,78 @@ class AutoMLClassifier:
             datasets.append(oot2_data)
             dataset_names.append('oot2')
         
-        # Build and validate models using dual training approach
-        for model_type in ['logistic', 'random_forest', 'gradient_boosting', 'decision_tree', 'neural_network', 'xgboost', 'lightgbm']:
-            if self.config.get(f'run_{model_type}', True):
-                # Skip gradient boosting for multi-class problems (PySpark limitation)
-                if model_type == 'gradient_boosting' and self.is_multiclass:
-                    print(f"Skipping {model_type} model - PySpark GBTClassifier only supports binary classification")
-                    continue
+        # 🚀 PERSIST ALL DATASETS ONCE FOR ALL MODELS
+        print("💾 Persisting all datasets once for all model training and hyperparameter tuning...")
+        
+        # Track all datasets that need to be unpersisted
+        datasets_to_unpersist = []
+        
+        try:
+            if not train_data.is_cached:
+                train_data.persist()
+                datasets_to_unpersist.append(('train_data', train_data))
+                print(f"✅ Training data persisted: {train_data.count()} rows")
+            else:
+                print("ℹ️ Training data already persisted")
+        except Exception as e:
+            print(f"⚠️ Could not persist training data: {e}")
+        
+        # Persist validation datasets if they exist
+        for dataset_name, dataset in [('valid_data', valid_data), ('test_data', test_data), 
+                                     ('oot1_data', oot1_data), ('oot2_data', oot2_data)]:
+            if dataset is not None:
+                try:
+                    if not dataset.is_cached:
+                        dataset.persist()
+                        datasets_to_unpersist.append((dataset_name, dataset))
+                        print(f"✅ {dataset_name} persisted: {dataset.count()} rows")
+                    else:
+                        print(f"ℹ️ {dataset_name} already persisted")
+                except Exception as e:
+                    print(f"⚠️ Could not persist {dataset_name}: {e}")
+        
+        try:
+            # Build and validate models using dual training approach
+            for model_type in ['logistic', 'random_forest', 'gradient_boosting', 'decision_tree', 'neural_network', 'xgboost', 'lightgbm']:
+                if self.config.get(f'run_{model_type}', True):
+                    # Skip gradient boosting for multi-class problems (PySpark limitation)
+                    if model_type == 'gradient_boosting' and self.is_multiclass:
+                        print(f"Skipping {model_type} model - PySpark GBTClassifier only supports binary classification")
+                        continue
+                        
+                    print(f"Building {model_type} model...")
                     
-                print(f"Building {model_type} model...")
-                
-                # Use dual training approach to select best model
-                model_result = self._build_model_with_dual_training(
-                    train_data, target_column, model_type, top_features, datasets, dataset_names
-                )
-                
-                # Store selected model and metrics
-                selected_model = model_result['model']
-                selected_metrics = model_result['metrics']
-                comparison_info = model_result['comparison']
-                
-                # Store metrics with comparison information
-                self.model_metrics[model_type] = selected_metrics
-                self.model_metrics[model_type]['selection_info'] = comparison_info
-                
-                # Save the selected model
-                model_path = os.path.join(self.output_dir, f'{model_type}_model')
-                self.model_builder.save_model(selected_model, model_path)
-                
-                print(f"✅ {model_type} model training completed - selected {comparison_info['decision']} version")
+                    # Use dual training approach to select best model
+                    model_result = self._build_model_with_dual_training(
+                        train_data, target_column, model_type, top_features, datasets, dataset_names
+                    )
+                    
+                    # Store selected model and metrics
+                    selected_model = model_result['model']
+                    selected_metrics = model_result['metrics']
+                    comparison_info = model_result['comparison']
+                    
+                    # Store metrics with comparison information
+                    self.model_metrics[model_type] = selected_metrics
+                    self.model_metrics[model_type]['selection_info'] = comparison_info
+                    
+                    # Save the selected model
+                    model_path = os.path.join(self.output_dir, f'{model_type}_model')
+                    self.model_builder.save_model(selected_model, model_path)
+                    
+                    print(f"✅ {model_type} model training completed - selected {comparison_info['decision']} version")
 
-        return dataset_names
+            return dataset_names
+        finally:
+            # 🧹 CLEANUP: Unpersist all datasets after ALL models are complete
+            print("🧹 Unpersisting all datasets after all models completed...")
+            for dataset_name, dataset in datasets_to_unpersist:
+                try:
+                    if dataset.is_cached:
+                        dataset.unpersist()
+                        print(f"🧹 {dataset_name} unpersisted")
+                except Exception as e:
+                    print(f"⚠️ Could not unpersist {dataset_name}: {e}")
 
     def _build_and_validate_models_cv(self, train_data: DataFrame, train_original_data: DataFrame,
                                      valid_data: DataFrame, test_data: DataFrame, oot1_data: Optional[DataFrame],
@@ -1697,6 +1650,9 @@ class AutoMLClassifier:
             except Exception as e:
                 print(f"⚠️  Could not apply enhanced tuning optimizations: {e}")
         
+        # ℹ️ Training data should already be persisted at the model building level
+        # No need to persist/unpersist here since it's handled at the higher level
+        
         # Initialize hyperparameter tuner if needed
         if self.hyperparameter_tuner is None:
             self.hyperparameter_tuner = HyperparameterTuner(self.spark, self.config)
@@ -1710,6 +1666,13 @@ class AutoMLClassifier:
     
     def _select_best_model(self, target_column: str, dataset_names: List[str]):
         """Select the best model based on criteria."""
+        # Check if any models were trained
+        if not self.model_metrics:
+            raise ValueError(
+                "No models were trained. This usually happens when all models are disabled in the configuration. "
+                "Please enable at least one model in the UI (e.g., Logistic Regression, Random Forest, etc.)."
+            )
+        
         best_model_info = self.model_selector.select_best_model(
             self.model_metrics, 
             self.config['model_selection_criteria'],
@@ -1927,6 +1890,7 @@ class AutoMLClassifier:
         # Initialize variables for tuned model
         tuned_model = None
         tuned_metrics = None
+        optimization_results = None
         
         # Build hyperparameter-tuned model if enabled
         if self.config.get('enable_hyperparameter_tuning', False):
@@ -1957,32 +1921,55 @@ class AutoMLClassifier:
                 train_data, target_column, model_type, len(top_features), self.model_builder.model_types
             )
         
-        # Build tuned model
-        tuned_model = self.model_builder.build_model(
-            train_data, 'features', target_column, model_type,
-            num_features=len(top_features),
-            **optimization_results['best_params']
-        )
-        
-        # Validate tuned model
-        tuned_metrics = self.model_validator.validate_model(
-            tuned_model, datasets, dataset_names, target_column, f"{model_type}_tuned"
-        )
-        
-        # Compare models and select the better one
-        comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
-        
-        # Log detailed comparison
-        self._log_model_comparison(model_type, comparison_result)
-        
-        return {
-            'model': tuned_model,
-            'metrics': tuned_metrics,
-            'model_type': f"{model_type}_tuned",
-            'comparison': comparison_result,
-            'default_metrics': default_metrics,
-            'tuned_metrics': tuned_metrics
-        }
+        # Check if optimization results are valid
+        if not optimization_results or 'best_params' not in optimization_results or not optimization_results['best_params']:
+            print(f"    ⚠️ No valid optimization results for {model_type}. Skipping tuned model build.")
+            print(f"    📊 Using default {model_type} model only.")
+            
+            return {
+                'model': default_model,
+                'metrics': default_metrics,
+                'model_type': f"{model_type}_default",
+                'comparison': {
+                    'decision': 'default',
+                    'reasons': ['No valid hyperparameter optimization results - using default model'],
+                    'primary_metric': self._get_primary_metric(),
+                    'default_score': self._extract_score(default_metrics, self._get_primary_metric())
+                },
+                'default_metrics': default_metrics,
+                'tuned_metrics': None
+            }
+        else:
+            # Only build tuned model if we have valid optimization results
+            print(f"    🔧 Building tuned {model_type} model with optimized parameters...")
+            
+            # Build tuned model
+            tuned_model = self.model_builder.build_model(
+                train_data, 'features', target_column, model_type,
+                feature_count=len(top_features),
+                num_classes=self.num_classes,
+                **optimization_results['best_params']
+            )
+            
+            # Validate tuned model
+            tuned_metrics = self.model_validator.validate_model(
+                tuned_model, datasets, dataset_names, target_column, f"{model_type}_tuned"
+            )
+            
+            # Compare models and select the better one
+            comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
+            
+            # Log detailed comparison
+            self._log_model_comparison(model_type, comparison_result)
+            
+            return {
+                'model': tuned_model,
+                'metrics': tuned_metrics,
+                'model_type': f"{model_type}_tuned",
+                'comparison': comparison_result,
+                'default_metrics': default_metrics,
+                'tuned_metrics': tuned_metrics
+            }
     
     def _log_model_comparison(self, model_type: str, comparison: Dict[str, Any]):
         """Log detailed model comparison results."""
@@ -2110,52 +2097,75 @@ class AutoMLClassifier:
                 best_params = optimization_results['best_params']
                 print(f"    🔧 Optimized parameters: {best_params}")
             
-            # Create tuned estimator
-            tuned_estimator = self.model_builder.create_estimator(
-                'features', target_column, model_type,
-                num_classes=self.num_classes if self.is_multiclass else 2,
-                feature_count=len(top_features),
-                **best_params
-            )
-            
-            tuned_param_grid = ParamGridBuilder().build()  # Empty grid - uses optimized params
-            
-            tuned_cv = CrossValidator(
-                estimator=tuned_estimator,
-                estimatorParamMaps=tuned_param_grid,
-                evaluator=evaluator,
-                numFolds=cv_folds,
-                seed=42
-            )
-            
-            tuned_cv_model = tuned_cv.fit(cv_data)
-            tuned_final_model = tuned_cv_model.bestModel
-            
-            # Validate tuned model on all datasets
-            if self.is_multiclass:
-                tuned_metrics = self.model_validator.validate_model_multiclass(
-                    tuned_final_model, datasets, dataset_names, target_column, f"{model_type}_tuned", self.output_dir
-                )
+            # Check if we have valid optimization results
+            if not best_params:
+                print(f"    ⚠️ No valid optimization results for {model_type}. Skipping tuned model build.")
+                print(f"    📊 Using default {model_type} model only.")
+                
+                comparison_result = {
+                    'decision': 'default',
+                    'reasons': ['No valid hyperparameter optimization results - using default model'],
+                    'default_score': self._extract_score(default_metrics, self._get_primary_metric()),
+                    'default_cv_score': default_metrics['cv_score']
+                }
+                
+                return {
+                    'model': default_final_model,
+                    'metrics': default_metrics,
+                    'model_type': f"{model_type}_default",
+                    'comparison': comparison_result,
+                    'default_metrics': default_metrics,
+                    'tuned_metrics': None
+                }
             else:
-                tuned_metrics = self.model_validator.validate_model(
-                    tuned_final_model, datasets, dataset_names, target_column, f"{model_type}_tuned"
+                print(f"    🔧 Building tuned {model_type} model with optimized parameters...")
+                
+                # Create tuned estimator
+                tuned_estimator = self.model_builder.create_estimator(
+                    'features', target_column, model_type,
+                    num_classes=self.num_classes if self.is_multiclass else 2,
+                    feature_count=len(top_features),
+                    **best_params
                 )
-            
-            # Add CV score to metrics
-            tuned_metrics['cv_score'] = float(tuned_cv_model.avgMetrics[0])
-            
-            # Compare models and select the better one
-            comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
-            
-            # Add CV score comparison
-            cv_improvement = tuned_metrics['cv_score'] - default_metrics['cv_score']
-            comparison_result['cv_improvement'] = cv_improvement
-            comparison_result['default_cv_score'] = default_metrics['cv_score']
-            comparison_result['tuned_cv_score'] = tuned_metrics['cv_score']
-            
-            # Log detailed comparison including CV scores
-            self._log_model_comparison_cv(model_type, comparison_result)
-            
+                
+                tuned_param_grid = ParamGridBuilder().build()  # Empty grid - uses optimized params
+                
+                tuned_cv = CrossValidator(
+                    estimator=tuned_estimator,
+                    estimatorParamMaps=tuned_param_grid,
+                    evaluator=evaluator,
+                    numFolds=cv_folds,
+                    seed=42
+                )
+                
+                tuned_cv_model = tuned_cv.fit(cv_data)
+                tuned_final_model = tuned_cv_model.bestModel
+                
+                # Validate tuned model on all datasets
+                if self.is_multiclass:
+                    tuned_metrics = self.model_validator.validate_model_multiclass(
+                        tuned_final_model, datasets, dataset_names, target_column, f"{model_type}_tuned", self.output_dir
+                    )
+                else:
+                    tuned_metrics = self.model_validator.validate_model(
+                        tuned_final_model, datasets, dataset_names, target_column, f"{model_type}_tuned"
+                    )
+                
+                # Add CV score to metrics
+                tuned_metrics['cv_score'] = float(tuned_cv_model.avgMetrics[0])
+                
+                # Compare models and select the better one
+                comparison_result = self._compare_models(default_metrics, tuned_metrics, model_type)
+                
+                # Add CV score comparison
+                cv_improvement = tuned_metrics['cv_score'] - default_metrics['cv_score']
+                comparison_result['cv_improvement'] = cv_improvement
+                comparison_result['default_cv_score'] = default_metrics['cv_score']
+                comparison_result['tuned_cv_score'] = tuned_metrics['cv_score']
+                
+                # Log detailed comparison including CV scores
+                self._log_model_comparison_cv(model_type, comparison_result)
+        
         else:
             print(f"  📝 Hyperparameter optimization disabled - using default {model_type} model")
             comparison_result = {
@@ -2681,3 +2691,25 @@ class AutoMLClassifier:
             print(f"❌ Failed to restart Spark session: {e}")
             print("💡 This may indicate a deeper system issue or insufficient resources")
             return False
+    
+    def _determine_dataset_size_from_counts(self, total_rows: Optional[int], total_columns: int) -> str:
+        """
+        Determine dataset size category based on row and column counts.
+        
+        Args:
+            total_rows: Number of rows (can be None for very large datasets)
+            total_columns: Number of columns
+            
+        Returns:
+            str: 'small', 'medium', or 'large'
+        """
+        if total_rows is None:
+            # For very large BigQuery datasets where we couldn't get exact count
+            return 'large'
+        
+        if total_rows < 10000:
+            return 'small'
+        elif total_rows < 100000:
+            return 'medium'
+        else:
+            return 'large'

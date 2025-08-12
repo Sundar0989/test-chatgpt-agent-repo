@@ -199,14 +199,22 @@ class ClusteringModelValidator:
         metrics = {}
         
         try:
-            # Silhouette Score
-            evaluator = ClusteringEvaluator()
-            silhouette = evaluator.evaluate(predictions)
-            metrics['silhouette_score'] = silhouette
-            
-            # Get number of clusters
+            # Get number of clusters first
             num_clusters = self._get_num_clusters(predictions)
             metrics['num_clusters'] = num_clusters
+            
+            # Silhouette Score - only calculate if we have more than 1 cluster
+            if num_clusters > 1:
+                try:
+                    evaluator = ClusteringEvaluator()
+                    silhouette = evaluator.evaluate(predictions)
+                    metrics['silhouette_score'] = silhouette
+                except Exception as silhouette_error:
+                    print(f"   ⚠️ Could not calculate silhouette score: {str(silhouette_error)}")
+                    metrics['silhouette_score'] = -1.0
+            else:
+                print(f"   ⚠️ Only {num_clusters} cluster(s) found - silhouette score requires at least 2 clusters")
+                metrics['silhouette_score'] = -1.0
             
             # Convert to pandas for additional metrics
             pred_pandas = predictions.select("features", "prediction").toPandas()
@@ -333,8 +341,22 @@ class ClusteringModelValidator:
             # Extract features
             features_list = []
             for row in predictions.select("features").collect():
-                features_list.append(row.features.toArray())
+                if hasattr(row.features, 'toArray'):
+                    features_list.append(row.features.toArray())
+                else:
+                    # Handle case where features might be a different format
+                    features_list.append(np.array(row.features))
+            
+            if not features_list:
+                print(f"      ⚠️ No features extracted - skipping plots")
+                return plot_files
+            
             features_array = np.array(features_list)
+            
+            # Check if features array is valid
+            if features_array.size == 0 or features_array.shape[0] == 0:
+                print(f"      ⚠️ Empty features array - skipping plots")
+                return plot_files
             
             cluster_labels = pred_pandas["prediction"].values
             
@@ -374,7 +396,7 @@ class ClusteringModelValidator:
                 plot_files.append(plot_file)
             
             # 5. Cluster Centers Heatmap (if features are not too many)
-            if features_array.shape[1] <= 50:  # Only for reasonable number of features
+            if len(features_array.shape) >= 2 and features_array.shape[1] <= 50:  # Only for reasonable number of features
                 plot_file = self._create_cluster_centers_heatmap(
                     features_array, cluster_labels, model_type
                 )
@@ -614,6 +636,11 @@ class ClusteringModelValidator:
     def _create_cluster_visualization_plot(self, features, labels, model_type, method='PCA'):
         """Create 2D cluster visualization using PCA or t-SNE."""
         try:
+            # Check if features array is valid
+            if len(features.shape) < 2 or features.shape[0] == 0:
+                print(f"      ⚠️ Invalid features array for {method} visualization - skipping")
+                return None
+            
             plt.figure(figsize=(12, 10))
             
             # Reduce dimensions to 2D
@@ -631,17 +658,34 @@ class ClusteringModelValidator:
             
             # Create scatter plot
             unique_labels = np.unique(labels)
-            colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
             
-            for i, label in enumerate(unique_labels):
-                mask = labels == label
-                plt.scatter(features_2d[mask, 0], features_2d[mask, 1], 
-                          c=[colors[i]], label=f'Cluster {int(label)}', 
-                          alpha=0.7, s=50)
+            # Handle case where all points are noise (cluster -1)
+            if len(unique_labels) == 1 and unique_labels[0] == -1:
+                plt.scatter(features_2d[:, 0], features_2d[:, 1], 
+                          c='red', label='Noise', alpha=0.7, s=50)
+                plt.title(f'{model_type} - Cluster Visualization using {method}\nAll points classified as noise (no clusters found)')
+            else:
+                colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
+                
+                for i, label in enumerate(unique_labels):
+                    mask = labels == label
+                    if label == -1:
+                        # Handle noise points in DBSCAN
+                        plt.scatter(features_2d[mask, 0], features_2d[mask, 1], 
+                                  c='red', label=f'Noise (Cluster {int(label)})', 
+                                  alpha=0.7, s=50)
+                    else:
+                        plt.scatter(features_2d[mask, 0], features_2d[mask, 1], 
+                                  c=[colors[i]], label=f'Cluster {int(label)}', 
+                                  alpha=0.7, s=50)
             
             plt.xlabel(f'{method} Component 1')
             plt.ylabel(f'{method} Component 2')
-            plt.title(f'{model_type} - Cluster Visualization using {method} {title_suffix}')
+            
+            # Set title based on whether we already set it for noise case
+            if not (len(unique_labels) == 1 and unique_labels[0] == -1):
+                plt.title(f'{model_type} - Cluster Visualization using {method} {title_suffix}')
+            
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.grid(True, alpha=0.3)
             
@@ -678,6 +722,22 @@ class ClusteringModelValidator:
         try:
             from sklearn.metrics import silhouette_samples, silhouette_score
             
+            # Check if features array is valid
+            if len(features.shape) < 2 or features.shape[0] == 0:
+                print(f"      ⚠️ Invalid features array for silhouette plot - skipping")
+                return None
+            
+            # Check if we have valid clusters (not all noise)
+            unique_labels = np.unique(labels)
+            if len(unique_labels) == 1 and unique_labels[0] == -1:
+                print(f"      ⚠️ All points are noise - skipping silhouette plot")
+                return None
+            
+            # Check if we have at least 2 clusters for silhouette analysis
+            if len(unique_labels) < 2:
+                print(f"      ⚠️ Need at least 2 clusters for silhouette analysis - skipping")
+                return None
+            
             # Calculate silhouette scores
             sample_silhouette_values = silhouette_samples(features, labels)
             silhouette_avg = silhouette_score(features, labels)
@@ -685,10 +745,13 @@ class ClusteringModelValidator:
             plt.figure(figsize=(12, 8))
             
             y_lower = 10
-            unique_labels = np.unique(labels)
             colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
             
             for i, label in enumerate(unique_labels):
+                # Skip noise points (-1) for silhouette analysis
+                if label == -1:
+                    continue
+                    
                 # Aggregate silhouette scores for samples belonging to cluster
                 cluster_silhouette_values = sample_silhouette_values[labels == label]
                 cluster_silhouette_values.sort()
@@ -735,24 +798,50 @@ class ClusteringModelValidator:
     def _create_cluster_statistics_plot(self, features, labels, model_type):
         """Create cluster statistics visualization."""
         try:
+            # Check if features array is valid
+            if len(features.shape) < 2 or features.shape[0] == 0:
+                print(f"      ⚠️ Invalid features array for cluster statistics plot - skipping")
+                return None
+            
             unique_labels = np.unique(labels)
             num_clusters = len(unique_labels)
+            
+            # Handle case where all points are noise
+            if len(unique_labels) == 1 and unique_labels[0] == -1:
+                print(f"      ⚠️ All points are noise - skipping cluster statistics plot")
+                return None
             
             plt.figure(figsize=(15, 10))
             
             # 1. Cluster sizes
             plt.subplot(2, 3, 1)
             cluster_sizes = [np.sum(labels == label) for label in unique_labels]
-            plt.bar(range(num_clusters), cluster_sizes, color=plt.cm.Set3(np.linspace(0, 1, num_clusters)))
-            plt.xlabel('Cluster')
-            plt.ylabel('Number of Points')
-            plt.title('Cluster Sizes')
-            plt.xticks(range(num_clusters), [f'C{int(label)}' for label in unique_labels])
+            
+            # Handle noise points (-1) specially
+            if -1 in unique_labels:
+                # Filter out noise points for visualization
+                valid_labels = [label for label in unique_labels if label != -1]
+                valid_sizes = [np.sum(labels == label) for label in valid_labels]
+                plt.bar(range(len(valid_labels)), valid_sizes, color=plt.cm.Set3(np.linspace(0, 1, len(valid_labels))))
+                plt.xlabel('Cluster')
+                plt.ylabel('Number of Points')
+                plt.title('Cluster Sizes (Excluding Noise)')
+                plt.xticks(range(len(valid_labels)), [f'C{int(label)}' for label in valid_labels])
+            else:
+                plt.bar(range(num_clusters), cluster_sizes, color=plt.cm.Set3(np.linspace(0, 1, num_clusters)))
+                plt.xlabel('Cluster')
+                plt.ylabel('Number of Points')
+                plt.title('Cluster Sizes')
+                plt.xticks(range(num_clusters), [f'C{int(label)}' for label in unique_labels])
             
             # 2. Cluster densities (average distance to centroid)
             plt.subplot(2, 3, 2)
             cluster_densities = []
+            labels_for_density = []
+            
             for label in unique_labels:
+                if label == -1:  # Skip noise points
+                    continue
                 mask = labels == label
                 cluster_points = features[mask]
                 if len(cluster_points) > 0:
@@ -760,14 +849,20 @@ class ClusteringModelValidator:
                     distances = np.linalg.norm(cluster_points - centroid, axis=1)
                     avg_distance = np.mean(distances)
                     cluster_densities.append(avg_distance)
+                    labels_for_density.append(label)
                 else:
                     cluster_densities.append(0)
+                    labels_for_density.append(label)
             
-            plt.bar(range(num_clusters), cluster_densities, color=plt.cm.Set3(np.linspace(0, 1, num_clusters)))
-            plt.xlabel('Cluster')
-            plt.ylabel('Average Distance to Centroid')
-            plt.title('Cluster Density')
-            plt.xticks(range(num_clusters), [f'C{int(label)}' for label in unique_labels])
+            if cluster_densities:
+                plt.bar(range(len(cluster_densities)), cluster_densities, color=plt.cm.Set3(np.linspace(0, 1, len(cluster_densities))))
+                plt.xlabel('Cluster')
+                plt.ylabel('Average Distance to Centroid')
+                plt.title('Cluster Density (Excluding Noise)')
+                plt.xticks(range(len(cluster_densities)), [f'C{int(label)}' for label in labels_for_density])
+            else:
+                plt.text(0.5, 0.5, 'No valid clusters found', ha='center', va='center', transform=plt.gca().transAxes)
+                plt.title('Cluster Density (No Valid Clusters)')
             
             # 3. Feature means by cluster (if not too many features)
             if features.shape[1] <= 10:
@@ -866,6 +961,11 @@ Max Cluster Density: {max(cluster_densities):.3f}'''
     def _create_cluster_centers_heatmap(self, features, labels, model_type):
         """Create heatmap of cluster centers."""
         try:
+            # Check if features array is valid
+            if len(features.shape) < 2 or features.shape[0] == 0:
+                print(f"      ⚠️ Invalid features array for heatmap - skipping")
+                return None
+            
             unique_labels = np.unique(labels)
             centroids = []
             
@@ -1103,75 +1203,126 @@ Max Cluster Density: {max(cluster_densities):.3f}'''
             pandas_data = predictions.select('features', 'prediction').toPandas()
             print(f"      📊 Pandas data shape: {pandas_data.shape}")
             
+            # Check if we have any data to plot
+            if len(pandas_data) == 0:
+                print(f"      ⚠️ No data to plot - empty predictions for {dataset_name}")
+                return plot_files
+            
             # Extract features from vector column
             print(f"      🔢 Extracting features array...")
-            features_array = np.array([row.features.toArray() for row in predictions.select('features').collect()])
+            features_list = []
+            for row in predictions.select('features').collect():
+                if hasattr(row.features, 'toArray'):
+                    features_list.append(row.features.toArray())
+                else:
+                    # Handle case where features might be a different format
+                    features_list.append(np.array(row.features))
+            
+            if not features_list:
+                print(f"      ⚠️ No features extracted - skipping plots for {dataset_name}")
+                return plot_files
+            
+            features_array = np.array(features_list)
             print(f"      🔢 Features array shape: {features_array.shape}")
             
-            # 1. Cluster scatter plot with PCA
-            if features_array.shape[1] >= 2:
-                # Use PCA for dimensionality reduction
-                pca = PCA(n_components=2)
-                features_2d = pca.fit_transform(features_array)
+            # Check if features array is valid
+            if features_array.size == 0 or features_array.shape[0] == 0:
+                print(f"      ⚠️ Empty features array - skipping plots for {dataset_name}")
+                return plot_files
+            
+            # Check if we have enough features for PCA
+            if len(features_array.shape) < 2 or features_array.shape[1] < 2:
+                print(f"      ⚠️ Not enough features for PCA (need >=2, got {features_array.shape if len(features_array.shape) >= 2 else 'empty'}) - skipping scatter plot")
+            else:
+                # 1. Cluster scatter plot with PCA
+                try:
+                    # Use PCA for dimensionality reduction
+                    pca = PCA(n_components=2)
+                    features_2d = pca.fit_transform(features_array)
+                    
+                    plt.figure(figsize=(10, 8))
+                    clusters = pandas_data['prediction'].unique()
+                    
+                    # Handle case where all predictions are -1 (noise in DBSCAN)
+                    if len(clusters) == 1 and clusters[0] == -1:
+                        print(f"      ⚠️ All points are noise (cluster -1) - creating noise plot")
+                        plt.scatter(features_2d[:, 0], features_2d[:, 1], 
+                                  c='red', label='Noise', alpha=0.6, s=50)
+                        plt.title(f'{model_type.title()} Clustering Results - {dataset_name.title()} Dataset\n'
+                                 f'All points classified as noise (no clusters found)')
+                    else:
+                        colors = plt.cm.Set1(np.linspace(0, 1, len(clusters)))
+                        
+                        for i, cluster in enumerate(sorted(clusters)):
+                            cluster_mask = pandas_data['prediction'] == cluster
+                            if cluster == -1:
+                                # Handle noise points in DBSCAN
+                                plt.scatter(features_2d[cluster_mask, 0], features_2d[cluster_mask, 1], 
+                                          c='red', label=f'Noise (Cluster {cluster})', alpha=0.6, s=50)
+                            else:
+                                plt.scatter(features_2d[cluster_mask, 0], features_2d[cluster_mask, 1], 
+                                          c=[colors[i]], label=f'Cluster {cluster}', alpha=0.6, s=50)
+                    
+                    plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2f})')
+                    plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2f})')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    
+                    # Save plot
+                    plot_filename = f"{model_type}_{dataset_name}_clustering_scatter.png"
+                    plot_path = os.path.join(self.plots_dir, plot_filename)
+                    print(f"      💾 Saving scatter plot: {plot_filename}")
+                    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    
+                    # Verify plot was saved
+                    if os.path.exists(plot_path):
+                        plot_files.append(plot_path)
+                        print(f"      ✅ Scatter plot saved successfully: {plot_path}")
+                    else:
+                        print(f"      ❌ Failed to save scatter plot: {plot_path}")
+                        
+                except Exception as scatter_error:
+                    print(f"      ⚠️ Error creating scatter plot: {str(scatter_error)}")
+            
+            # 2. Cluster distribution plot
+            try:
+                plt.figure(figsize=(10, 6))
+                cluster_counts = pandas_data['prediction'].value_counts().sort_index()
                 
-                plt.figure(figsize=(10, 8))
-                clusters = pandas_data['prediction'].unique()
-                colors = plt.cm.Set1(np.linspace(0, 1, len(clusters)))
+                # Handle case where all points are noise
+                if len(cluster_counts) == 1 and cluster_counts.index[0] == -1:
+                    plt.bar(['Noise'], [cluster_counts.iloc[0]], alpha=0.7, color='red', edgecolor='darkred')
+                    plt.title(f'Cluster Distribution - {dataset_name.title()} Dataset\n{model_type.title()} Model (All Noise)')
+                else:
+                    plt.bar(cluster_counts.index, cluster_counts.values, alpha=0.7, color='skyblue', edgecolor='navy')
+                    plt.title(f'Cluster Distribution - {dataset_name.title()} Dataset\n{model_type.title()} Model')
                 
-                for i, cluster in enumerate(sorted(clusters)):
-                    cluster_mask = pandas_data['prediction'] == cluster
-                    plt.scatter(features_2d[cluster_mask, 0], features_2d[cluster_mask, 1], 
-                              c=[colors[i]], label=f'Cluster {cluster}', alpha=0.6, s=50)
-                
-                plt.title(f'{model_type.title()} Clustering Results - {dataset_name.title()} Dataset\n'
-                         f'PCA Projection (Explained Variance: {pca.explained_variance_ratio_.sum():.2f})')
-                plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2f})')
-                plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2f})')
-                plt.legend()
+                plt.xlabel('Cluster ID')
+                plt.ylabel('Number of Points')
                 plt.grid(True, alpha=0.3)
                 
+                # Add value labels on bars
+                for i, v in enumerate(cluster_counts.values):
+                    plt.text(cluster_counts.index[i], v + max(cluster_counts.values) * 0.01, str(v), 
+                            ha='center', va='bottom')
+                
                 # Save plot
-                plot_filename = f"{model_type}_{dataset_name}_clustering_scatter.png"
+                plot_filename = f"{model_type}_{dataset_name}_distribution.png"
                 plot_path = os.path.join(self.plots_dir, plot_filename)
-                print(f"      💾 Saving scatter plot: {plot_filename}")
+                print(f"      💾 Saving distribution plot: {plot_filename}")
                 plt.savefig(plot_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 
                 # Verify plot was saved
                 if os.path.exists(plot_path):
                     plot_files.append(plot_path)
-                    print(f"      ✅ Scatter plot saved successfully: {plot_path}")
+                    print(f"      ✅ Distribution plot saved successfully: {plot_path}")
                 else:
-                    print(f"      ❌ Failed to save scatter plot: {plot_path}")
-                
-            # 2. Cluster distribution plot
-            plt.figure(figsize=(10, 6))
-            cluster_counts = pandas_data['prediction'].value_counts().sort_index()
-            
-            plt.bar(cluster_counts.index, cluster_counts.values, alpha=0.7, color='skyblue', edgecolor='navy')
-            plt.title(f'Cluster Distribution - {dataset_name.title()} Dataset\n{model_type.title()} Model')
-            plt.xlabel('Cluster ID')
-            plt.ylabel('Number of Points')
-            plt.grid(True, alpha=0.3)
-            
-            # Add value labels on bars
-            for i, v in enumerate(cluster_counts.values):
-                plt.text(cluster_counts.index[i], v + max(cluster_counts.values) * 0.01, str(v), 
-                        ha='center', va='bottom')
-            
-            # Save plot
-            plot_filename = f"{model_type}_{dataset_name}_distribution.png"
-            plot_path = os.path.join(self.plots_dir, plot_filename)
-            print(f"      💾 Saving distribution plot: {plot_filename}")
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            # Verify plot was saved
-            if os.path.exists(plot_path):
-                plot_files.append(plot_path)
-                print(f"      ✅ Distribution plot saved successfully: {plot_path}")
-            else:
-                print(f"      ❌ Failed to save distribution plot: {plot_path}")
+                    print(f"      ❌ Failed to save distribution plot: {plot_path}")
+                    
+            except Exception as dist_error:
+                print(f"      ⚠️ Error creating distribution plot: {str(dist_error)}")
             
         except Exception as e:
             print(f"   ⚠️ Error generating plots for {dataset_name}: {str(e)}")

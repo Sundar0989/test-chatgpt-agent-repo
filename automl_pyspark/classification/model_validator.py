@@ -97,7 +97,14 @@ class ModelValidator:
                     model_output_dir, dataset, target_column, 
                     model, model_type, dataset_name
                 )
-                all_metrics.extend(metrics)
+                
+                # Handle case where model_validation returns None due to failure
+                if metrics is not None:
+                    all_metrics.extend(metrics)
+                else:
+                    # Add default metrics for failed validation
+                    print(f"⚠️ Model validation failed for {dataset_name}, using default metrics")
+                    all_metrics.extend([0.0, 0.0, 0.0])
                 
             else:
                 # Add default metrics for missing dataset

@@ -256,6 +256,9 @@ class ClusteringModelBuilder:
         if not SKLEARN_AVAILABLE:
             raise ImportError("DBSCAN requires sklearn. Install with: pip install scikit-learn")
 
+        # Import numpy for array operations
+        import numpy as np
+
         # Capture Spark session from the outer class.  This allows the wrapper to
         # create DataFrames without accessing undefined attributes on itself.
         spark_session = self.spark
@@ -320,14 +323,35 @@ class ClusteringModelBuilder:
         
         print("🔍 Building DBSCAN model with parameter optimization...")
         
-        # DBSCAN parameters to test
-        eps_values = params.get('eps_values', [0.1, 0.3, 0.5, 0.7, 1.0])
-        minPts_values = params.get('minPts_values', [3, 5, 7, 10])
+        # Get data characteristics to better tune parameters
+        data_count = train_data.count()
+        print(f"📊 Dataset size: {data_count} samples")
+        
+        # Adaptive parameter selection based on data size
+        if data_count < 50:
+            # Small dataset - use more conservative parameters
+            eps_values = [0.1, 0.2, 0.3, 0.5]
+            minPts_values = [2, 3, 4]
+        elif data_count < 200:
+            # Medium dataset
+            eps_values = [0.1, 0.2, 0.3, 0.5, 0.7]
+            minPts_values = [3, 4, 5, 7]
+        else:
+            # Large dataset - use default parameters
+            eps_values = params.get('eps_values', [0.1, 0.3, 0.5, 0.7, 1.0])
+            minPts_values = params.get('minPts_values', [3, 5, 7, 10])
+        
+        # Ensure minPts doesn't exceed data size
+        max_minPts = min(max(minPts_values), max(3, data_count // 10))
+        minPts_values = [p for p in minPts_values if p <= max_minPts]
+        
+        print(f"🔧 Adaptive parameters: eps_values={eps_values}, minPts_values={minPts_values}")
         
         best_model = None
         best_score = -1.0
         best_params = {}
         all_results = []
+        valid_models = 0
         
         # Test different parameter combinations
         for eps in eps_values:
@@ -340,14 +364,18 @@ class ClusteringModelBuilder:
                     fitted_model = dbscan_model.fit(train_data)
                     predictions = fitted_model.transform(train_data)
                     
-                    # Calculate silhouette score
+                    # Calculate silhouette score with better error handling
                     silhouette_score = self._calculate_dbscan_silhouette(predictions)
                     
                     # Count clusters (excluding noise points with label -1)
                     unique_clusters = predictions.select("prediction").distinct().collect()
                     n_clusters = len([c for c in unique_clusters if c.prediction != -1])
                     
-                    print(f"      Silhouette Score: {silhouette_score:.4f}, Clusters: {n_clusters}")
+                    # Count noise points
+                    noise_count = predictions.filter(predictions.prediction == -1).count()
+                    noise_percentage = (noise_count / data_count) * 100
+                    
+                    print(f"      Silhouette Score: {silhouette_score:.4f}, Clusters: {n_clusters}, Noise: {noise_percentage:.1f}%")
                     
                     # Store results
                     result = {
@@ -356,24 +384,63 @@ class ClusteringModelBuilder:
                         'model': fitted_model,
                         'predictions': predictions,
                         'silhouette_score': silhouette_score,
-                        'n_clusters': n_clusters
+                        'n_clusters': n_clusters,
+                        'noise_percentage': noise_percentage
                     }
                     all_results.append(result)
                     
-                    # Check if this is the best model
-                    if silhouette_score > best_score and n_clusters > 1:  # Prefer models with more than 1 cluster
-                        best_model = fitted_model
-                        best_score = silhouette_score
-                        best_params = {'eps': eps, 'minPts': minPts}
+                    # Check if this is a valid model (at least 2 clusters, reasonable noise)
+                    is_valid = (n_clusters >= 2 and 
+                               silhouette_score > -1.0 and 
+                               noise_percentage < 80.0)  # Less than 80% noise
+                    
+                    if is_valid:
+                        valid_models += 1
+                        # Check if this is the best model
+                        if silhouette_score > best_score:
+                            best_model = fitted_model
+                            best_score = silhouette_score
+                            best_params = {'eps': eps, 'minPts': minPts}
                         
                 except Exception as e:
                     print(f"      ❌ Error with eps={eps}, minPts={minPts}: {str(e)}")
                     continue
         
+        # If no valid models found, try more conservative parameters
         if best_model is None:
-            print("⚠️ No valid DBSCAN model found, using default parameters")
-            best_model = self._create_dbscan_model(0.5, 5).fit(train_data)
-            best_params = {'eps': 0.5, 'minPts': 5}
+            print("⚠️ No valid DBSCAN model found, trying conservative parameters...")
+            conservative_eps = [0.05, 0.1, 0.15, 0.2]
+            conservative_minPts = [2, 3]
+            
+            for eps in conservative_eps:
+                for minPts in conservative_minPts:
+                    try:
+                        dbscan_model = self._create_dbscan_model(eps, minPts)
+                        fitted_model = dbscan_model.fit(train_data)
+                        predictions = fitted_model.transform(train_data)
+                        
+                        silhouette_score = self._calculate_dbscan_silhouette(predictions)
+                        unique_clusters = predictions.select("prediction").distinct().collect()
+                        n_clusters = len([c for c in unique_clusters if c.prediction != -1])
+                        
+                        if n_clusters >= 2 and silhouette_score > -1.0:
+                            best_model = fitted_model
+                            best_score = silhouette_score
+                            best_params = {'eps': eps, 'minPts': minPts}
+                            print(f"✅ Found conservative model: eps={eps}, minPts={minPts} (Silhouette: {silhouette_score:.4f})")
+                            break
+                    except Exception as e:
+                        continue
+                if best_model is not None:
+                    break
+        
+        # Final fallback
+        if best_model is None:
+            print("⚠️ DBSCAN failed to find meaningful clusters, using fallback model")
+            # Create a simple model that assigns all points to one cluster
+            best_model = self._create_fallback_model(train_data)
+            best_params = {'method': 'fallback'}
+            best_score = 0.0
         
         # Add metadata to the model
         best_model._automl_metadata = {
@@ -381,14 +448,30 @@ class ClusteringModelBuilder:
             'best_score': best_score,
             'all_results': all_results,
             'model_type': 'dbscan',
-            'elbow_method_used': False  # DBSCAN doesn't use elbow method
+            'elbow_method_used': False,  # DBSCAN doesn't use elbow method
+            'valid_models_found': valid_models,
+            'total_combinations_tested': len(eps_values) * len(minPts_values)
         }
         
-        print(f"✅ Best DBSCAN model: eps={best_params['eps']}, minPts={best_params['minPts']} (Silhouette: {best_score:.4f})")
+        print(f"✅ Best DBSCAN model: eps={best_params.get('eps', 'N/A')}, minPts={best_params.get('minPts', 'N/A')} (Silhouette: {best_score:.4f})")
         return best_model
     
+    def _create_fallback_model(self, train_data: DataFrame):
+        """Create a fallback model when DBSCAN fails."""
+        from pyspark.sql.functions import lit
+        
+        class FallbackModel:
+            def __init__(self):
+                self.fitted = True
+            
+            def transform(self, data: DataFrame) -> DataFrame:
+                # Assign all points to cluster 0
+                return data.withColumn("prediction", lit(0))
+        
+        return FallbackModel()
+    
     def _calculate_dbscan_silhouette(self, predictions: DataFrame) -> float:
-        """Calculate silhouette score for DBSCAN predictions."""
+        """Calculate silhouette score for DBSCAN predictions with improved error handling."""
         try:
             from sklearn.metrics import silhouette_score
             import numpy as np
@@ -412,11 +495,30 @@ class ClusteringModelBuilder:
             valid_features = features_array[valid_mask]
             valid_labels = labels_array[valid_mask]
             
-            # Calculate silhouette score
-            if len(np.unique(valid_labels)) < 2:
+            # Additional validation
+            unique_labels = np.unique(valid_labels)
+            if len(unique_labels) < 2:
                 return -1.0  # Need at least 2 clusters
             
-            return silhouette_score(valid_features, valid_labels)
+            # Check if we have enough samples per cluster
+            min_samples_per_cluster = min([np.sum(valid_labels == label) for label in unique_labels])
+            if min_samples_per_cluster < 2:
+                return -1.0  # Need at least 2 samples per cluster
+            
+            # Check for NaN or infinite values
+            if np.any(np.isnan(valid_features)) or np.any(np.isinf(valid_features)):
+                return -1.0  # Invalid features
+            
+            # Calculate silhouette score with error handling
+            try:
+                score = silhouette_score(valid_features, valid_labels)
+                # Ensure the score is within valid range [-1, 1]
+                if np.isnan(score) or np.isinf(score):
+                    return -1.0
+                return max(-1.0, min(1.0, score))  # Clamp to valid range
+            except Exception as silhouette_error:
+                print(f"   ⚠️ Silhouette calculation failed: {str(silhouette_error)}")
+                return -1.0
             
         except Exception as e:
             print(f"   ⚠️ Error calculating DBSCAN silhouette: {str(e)}")

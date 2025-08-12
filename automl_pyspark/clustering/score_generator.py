@@ -156,6 +156,7 @@ class {class_name}:
         """Create PySpark session with optimized configuration for clustering scoring."""
         return SparkSession.builder \
             .appName("{display_name} Scorer") \
+            .config("spark.driver.bindAddress", "127.0.0.1") \
             .config("spark.driver.memory", "4g") \
             .config("spark.executor.memory", "4g") \
             .config("spark.sql.adaptive.enabled", "true") \

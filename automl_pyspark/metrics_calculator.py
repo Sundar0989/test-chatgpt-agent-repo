@@ -45,42 +45,63 @@ def calculate_metrics(predictions, y, data_type):
     accuracy = accuracydf.agg(F.avg('acc')).collect()[0][0]
     print('Accuracy calculated', accuracy)
 
-    # Build KS Table
-    split1_udf = udf(lambda value: value[1].item(), DoubleType())
-
-    if data_type in ['train', 'valid', 'test', 'oot1', 'oot2']:
-        decileDF = predictions.select(y, split1_udf('probability').alias('probability'))
-    else:
-        decileDF = predictions.select(y, 'probability')
-
-    decileDF = decileDF.withColumn('non_target', 1 - decileDF[y])
-
+    # Build KS Table - Optimized Spark-native approach
+    # Pull the positive‑class probability as a scalar
     print('KS calculation starting')
-    window = Window.partitionBy(F.lit(1)).orderBy(desc("probability"))
-    decileDF = decileDF.withColumn("rownum", F.row_number().over(window))
-    decileDF.cache()
-    decileDF = decileDF.withColumn("rownum", decileDF["rownum"].cast("double"))
+    split1_udf = F.udf(lambda v: float(v[1]), DoubleType())
+    prob_col = split1_udf('probability') if data_type in {'train','valid','test','oot1','oot2'} \
+                                         else F.col('probability').cast(DoubleType())
 
-    window2 = Window.partitionBy(F.lit(1)).orderBy("rownum")
-    RFbucketedData = decileDF.withColumn("deciles", F.ntile(10).over(window2))
-    RFbucketedData = RFbucketedData.withColumn('deciles', RFbucketedData['deciles'].cast("int"))
-    RFbucketedData.cache()
+    decile_df = predictions.select(
+        F.col(y).cast('int').alias('label'),
+        prob_col.alias('probability')
+    ).withColumn('non_target', 1 - F.col('label'))
 
-    # to pandas from here    
-    target_cnt = RFbucketedData.groupBy('deciles').agg(F.sum(y).alias('target')).toPandas()
-    non_target_cnt = RFbucketedData.groupBy('deciles').agg(F.sum("non_target").alias('non_target')).toPandas()
-    overall_cnt = RFbucketedData.groupBy('deciles').count().alias('Total').toPandas()
-    overall_cnt = overall_cnt.merge(target_cnt, on='deciles', how='inner').merge(non_target_cnt, on='deciles', how='inner')
-    overall_cnt = overall_cnt.sort_values(by='deciles', ascending=True)
-    overall_cnt['Pct_target'] = (overall_cnt['target'] / overall_cnt['count']) * 100
-    overall_cnt['cum_target'] = overall_cnt.target.cumsum()
-    overall_cnt['cum_non_target'] = overall_cnt.non_target.cumsum()
-    overall_cnt['%Dist_Target'] = (overall_cnt['cum_target'] / overall_cnt.target.sum()) * 100
-    overall_cnt['%Dist_non_Target'] = (overall_cnt['cum_non_target'] / overall_cnt.non_target.sum()) * 100
-    overall_cnt['spread'] = builtins.abs(overall_cnt['%Dist_Target'] - overall_cnt['%Dist_non_Target'])
-    decile_table = overall_cnt.round(2)
-    print("KS_Value =", builtins.round(overall_cnt.spread.max(), 2))
-    decileDF.unpersist()
-    RFbucketedData.unpersist()
+    # Totals for normalisation
+    totals = decile_df.agg(
+        F.sum('label').alias('total_target'),
+        F.sum('non_target').alias('total_non_target')
+    ).first()
+    total_target = totals['total_target'] or 0.0
+    total_non_target = totals['total_non_target'] or 0.0
+
+    
+    
+    # Assign a deterministic row number to break ties
+    rn_window = Window.partitionBy(F.lit(1)).orderBy(F.desc('probability'))
+    df_with_rn = decile_df.withColumn('rownum', F.row_number().over(rn_window))
+    
+    # Then order by probability and rownum for decile assignment
+    ntile_window = Window.partitionBy(F.lit(1)).orderBy(F.desc('probability'), F.col('rownum'))
+    with_decile = df_with_rn.withColumn('decile', F.ntile(10).over(ntile_window))
+
+    # Aggregate once per decile
+    agg_df = (with_decile
+              .groupBy('decile')
+              .agg(F.count('*').alias('count'),
+                   F.sum('label').alias('target'),
+                   F.sum('non_target').alias('non_target'))
+              .orderBy('decile'))
+
+    # Cumulative sums within Spark
+    decile_window = Window.partitionBy(F.lit(1)).orderBy('decile').rowsBetween(Window.unboundedPreceding, 0)
+    agg_df = (agg_df
+              .withColumn('cum_target', F.sum('target').over(decile_window))
+              .withColumn('cum_non_target', F.sum('non_target').over(decile_window)))
+
+    # KS statistic: max difference between the two cumulative distributions
+    ks_col = F.abs(agg_df.cum_target/total_target - agg_df.cum_non_target/total_non_target)
+    ks_value = agg_df.select(F.max(ks_col)).first()[0]
+
+    # Convert *only the aggregated table* to pandas for plotting and round numbers
+    decile_table = (agg_df
+                    .withColumn('Pct_target', (agg_df.target/agg_df['count'])*100)
+                    .withColumn('%Dist_Target', (agg_df.cum_target/total_target)*100)
+                    .withColumn('%Dist_non_Target', (agg_df.cum_non_target/total_non_target)*100)
+                    .withColumn('spread', ks_col*100)
+                    .toPandas()
+                    .round(2))
+    
+    print("KS_Value =", builtins.round(ks_value*100, 2))
     print("Metrics calculation process Completed in : " + " %s seconds" % (time.time() - start_time4))
-    return auroc, accuracy, builtins.round(overall_cnt.spread.max(), 2), y_score, y_pred, y_true, overall_cnt
+    return auroc, accuracy, builtins.round(ks_value*100, 2), y_score, y_pred, y_true, decile_table

@@ -247,6 +247,7 @@ class {class_name}:
         """Create PySpark session with optimized configuration for regression scoring."""
         return SparkSession.builder \\
             .appName("{display_name}_Regression_Scoring") \\
+            .config("spark.driver.bindAddress", "127.0.0.1") \\
             .config("spark.sql.adaptive.enabled", "true") \\
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \\
             .config("spark.sql.adaptive.skewJoin.enabled", "true") \\
@@ -557,6 +558,7 @@ class {class_name}:
         """Get or create Spark session with optimized configuration."""
         return SparkSession.builder \\
             .appName("{class_name}_Regression_Scoring") \\
+            .config("spark.driver.bindAddress", "127.0.0.1") \\
             .config("spark.sql.adaptive.enabled", "true") \\
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \\
             .config("spark.sql.adaptive.skewJoin.enabled", "true") \\

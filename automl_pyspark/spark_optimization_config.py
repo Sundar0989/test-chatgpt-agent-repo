@@ -11,6 +11,7 @@ client is available.
 """
 
 from typing import Optional  # type hints for function signatures
+import os # Added for os.getenv
 
 def get_optimized_spark_config(include_synapseml: bool = False, include_bigquery: bool = True) -> dict:
     """Get optimized Spark configuration for AutoML workloads.
@@ -21,6 +22,19 @@ def get_optimized_spark_config(include_synapseml: bool = False, include_bigquery
     """
     
     config = {
+        # Local mode configuration - FIX FOR RPC ISSUES
+        "spark.driver.bindAddress": "127.0.0.1",
+        "spark.driver.host": "127.0.0.1",
+        "spark.driver.port": "0",  # Let Spark choose available port
+        "spark.executor.instances": "1",  # Single executor for local mode
+        "spark.dynamicAllocation.enabled": "false",  # Disable dynamic allocation for local mode
+        
+        # RPC and network timeout configurations - FIX FOR RPC TIMEOUT ISSUES
+        "spark.network.timeout": "800s",  # Increased from 600s
+        "spark.executor.heartbeatInterval": "60s",  # Reduced from 120s
+        "spark.rpc.askTimeout": "800s",  # Match network timeout
+        "spark.rpc.lookupTimeout": "800s",  # Match network timeout
+        
         # Memory and broadcasting optimizations
         "spark.sql.adaptive.enabled": "true",
         "spark.sql.adaptive.coalescePartitions.enabled": "true", 
@@ -62,6 +76,27 @@ def get_optimized_spark_config(include_synapseml: bool = False, include_bigquery
         "spark.sql.execution.arrow.maxRecordsPerBatch": "10000",  # Limit batch size
         "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",  # Allow small partitions (updated from deprecated minPartitionNum)
         "spark.sql.adaptive.coalescePartitions.parallelismFirst": "true",  # Prioritize parallelism
+        
+        # Local mode specific optimizations
+        "spark.sql.shuffle.partitions": "200",
+        "spark.default.parallelism": "200",
+        "spark.sql.execution.arrow.pyspark.fallback.enabled": "true",
+        
+        # Suppress JavaWrapper cleanup warnings and improve native library handling
+        "spark.sql.execution.arrow.pyspark.enabled": "true",
+        "spark.sql.execution.arrow.pyspark.fallback.enabled": "true",
+        "spark.sql.execution.arrow.maxRecordsPerBatch": "10000",
+        
+        # Native library optimizations
+        "spark.sql.adaptive.enabled": "true",
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "128MB",
+        
+        # Memory and garbage collection optimizations
+        "spark.cleaner.periodicGC.interval": "15min",
+        "spark.cleaner.referenceTracking.blocking": "true",
+        "spark.cleaner.referenceTracking.blocking.shuffle": "false",
+        "spark.cleaner.referenceTracking.cleanCheckpoints": "true",
     }
     
     # Add SynapseML configuration if requested
@@ -327,7 +362,7 @@ def create_bigquery_optimized_session(
     if use_local_jar:
         # Use local JAR for faster loading and better reliability.  Note that
         # the jar path is relative to the project root; adjust if needed.
-        jar_path = os.path.abspath("jars/spark-bigquery-with-dependencies_2.12-0.36.1.jar")
+        jar_path = os.path.abspath("libs/spark-bigquery-with-dependencies_2.12-0.36.1.jar")
         if os.path.exists(jar_path):
             print(f"📦 Using local BigQuery JAR: {jar_path}")
             builder = builder.config("spark.jars", jar_path)
@@ -405,35 +440,46 @@ def get_gradient_boosting_optimizations():
     """Get specific optimizations for gradient boosting models to reduce large task binary warnings."""
     
     return {
-        # AGGRESSIVE TASK BINARY REDUCTION FOR GRADIENT BOOSTING
-        "spark.sql.autoBroadcastJoinThreshold": "1m",        # Very small for GBT
-        "spark.sql.adaptive.broadcastJoinThreshold": "1m",   # Very small for GBT
-        "spark.broadcast.blockSize": "512k",                 # Extra small broadcast blocks
-        "spark.sql.execution.arrow.maxRecordsPerBatch": "1000",  # Very small batches
+        # ULTRA-AGGRESSIVE TASK BINARY REDUCTION FOR GRADIENT BOOSTING
+        "spark.sql.autoBroadcastJoinThreshold": "512k",      # Ultra small for GBT
+        "spark.sql.adaptive.broadcastJoinThreshold": "512k", # Ultra small for GBT
+        "spark.broadcast.blockSize": "256k",                 # Ultra small broadcast blocks
+        "spark.sql.execution.arrow.maxRecordsPerBatch": "500",  # Ultra small batches
         
         # Tree-specific memory optimizations
-        "spark.cleaner.periodicGC.interval": "3s",           # Very frequent GC for trees
-        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "16MB",  # Small partitions
+        "spark.cleaner.periodicGC.interval": "2s",           # Ultra frequent GC for trees
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "8MB",   # Ultra small partitions
         "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
         
         # Enhanced serialization for tree models
-        "spark.kryoserializer.buffer": "8k",                # Very small initial buffer
-        "spark.kryoserializer.buffer.max": "128m",          # Reduced max buffer for trees
-        "spark.serializer.objectStreamReset": "50",         # More frequent resets
+        "spark.kryoserializer.buffer": "4k",                # Ultra small initial buffer
+        "spark.kryoserializer.buffer.max": "64m",           # Ultra reduced max buffer for trees
+        "spark.serializer.objectStreamReset": "25",         # Ultra frequent resets
         
         # Disable features that increase task size
         "spark.sql.adaptive.localShuffleReader.enabled": "false",
         "spark.sql.adaptive.skewJoin.enabled": "false",
         "spark.sql.adaptive.bucketing.enabled": "false",
         "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",  # Disable partition coalescing
         
         # Memory pressure management
         "spark.cleaner.referenceTracking.blocking": "true",
         "spark.cleaner.referenceTracking.blocking.shuffle": "true",
-        "spark.executor.heartbeatInterval": "20s",          # More frequent heartbeats
+        "spark.cleaner.referenceTracking.cleanCheckpoints": "true",
+        "spark.executor.heartbeatInterval": "15s",          # Ultra frequent heartbeats
         
         # Force smaller feature vectors in broadcast
-        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "16MB",
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "8MB",
+        
+        # Additional task binary size reduction
+        "spark.task.maxDirectResultSize": "512m",           # Reduced direct result size
+        "spark.driver.maxResultSize": "1g",                 # Reduced driver result size
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "8MB",
+        
+        # Disable all caching to reduce memory pressure
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.maxSize": "0",
     }
 
 def apply_gradient_boosting_optimizations(spark_session):
@@ -591,6 +637,407 @@ def check_lightgbm_availability():
     except Exception as e:
         print(f"❌ Error checking LightGBM: {e}")
         return False
+
+def get_neural_network_optimizations():
+    """Get specific optimizations for neural network models to reduce large task binary warnings."""
+    
+    return {
+        # ULTRA-AGGRESSIVE TASK BINARY REDUCTION FOR NEURAL NETWORKS
+        "spark.sql.autoBroadcastJoinThreshold": "256k",      # Ultra small for neural networks
+        "spark.sql.adaptive.broadcastJoinThreshold": "256k", # Ultra small for neural networks
+        "spark.broadcast.blockSize": "128k",                 # Ultra small broadcast blocks
+        "spark.sql.execution.arrow.maxRecordsPerBatch": "250",  # Ultra small batches
+        
+        # Neural network specific memory optimizations
+        "spark.cleaner.periodicGC.interval": "1s",           # Ultra frequent GC for neural networks
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "4MB",   # Ultra small partitions
+        "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
+        
+        # Enhanced serialization for neural network models
+        "spark.kryoserializer.buffer": "2k",                # Ultra small initial buffer
+        "spark.kryoserializer.buffer.max": "32m",           # Ultra reduced max buffer for neural networks
+        "spark.serializer.objectStreamReset": "10",         # Ultra frequent resets
+        
+        # Disable features that increase task size
+        "spark.sql.adaptive.localShuffleReader.enabled": "false",
+        "spark.sql.adaptive.skewJoin.enabled": "false",
+        "spark.sql.adaptive.bucketing.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",  # Disable partition coalescing
+        
+        # Memory pressure management
+        "spark.cleaner.referenceTracking.blocking": "true",
+        "spark.cleaner.referenceTracking.blocking.shuffle": "true",
+        "spark.cleaner.referenceTracking.cleanCheckpoints": "true",
+        "spark.executor.heartbeatInterval": "10s",          # Ultra frequent heartbeats
+        
+        # Force smaller feature vectors in broadcast
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "4MB",
+        
+        # Additional task binary size reduction
+        "spark.task.maxDirectResultSize": "256m",           # Reduced direct result size
+        "spark.driver.maxResultSize": "512m",               # Reduced driver result size
+        
+        # Disable all caching to reduce memory pressure
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.maxSize": "0",
+        
+        # Neural network specific optimizations
+        "spark.sql.adaptive.coalescePartitions.parallelismFirst": "true",
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "4MB",
+    }
+
+def apply_neural_network_optimizations(spark_session):
+    """Apply neural network specific optimizations to reduce large task binary warnings.
+    
+    Args:
+        spark_session: The Spark session to optimize
+    """
+    
+    config = get_neural_network_optimizations()
+    print("🧠 Applying neural network optimizations to reduce large task binary warnings...")
+    
+    applied_count = 0
+    failed_count = 0
+    
+    for key, value in config.items():
+        try:
+            spark_session.conf.set(key, value)
+            applied_count += 1
+        except Exception as e:
+            print(f"   ⚠️ Could not set {key}: {e}")
+            failed_count += 1
+    
+    print(f"   ✅ Applied {applied_count} neural network optimizations")
+    if failed_count > 0:
+        print(f"   ⚠️ Failed to apply {failed_count} optimizations")
+
+def get_tree_based_optimizations():
+    """Get specific optimizations for all tree-based models to reduce large task binary warnings."""
+    
+    return {
+        # ULTRA-AGGRESSIVE TASK BINARY REDUCTION FOR ALL TREE-BASED MODELS
+        "spark.sql.autoBroadcastJoinThreshold": "256k",      # Ultra small for tree models
+        "spark.sql.adaptive.broadcastJoinThreshold": "256k", # Ultra small for tree models
+        "spark.broadcast.blockSize": "128k",                 # Ultra small broadcast blocks
+        "spark.sql.execution.arrow.maxRecordsPerBatch": "250",  # Ultra small batches
+        
+        # Tree-specific memory optimizations
+        "spark.cleaner.periodicGC.interval": "1s",           # Ultra frequent GC for trees
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "4MB",   # Ultra small partitions
+        "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
+        
+        # Enhanced serialization for tree models
+        "spark.kryoserializer.buffer": "2k",                # Ultra small initial buffer
+        "spark.kryoserializer.buffer.max": "32m",           # Ultra reduced max buffer for trees
+        "spark.serializer.objectStreamReset": "10",         # Ultra frequent resets
+        
+        # Disable features that increase task size
+        "spark.sql.adaptive.localShuffleReader.enabled": "false",
+        "spark.sql.adaptive.skewJoin.enabled": "false",
+        "spark.sql.adaptive.bucketing.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",  # Disable partition coalescing
+        
+        # Memory pressure management
+        "spark.cleaner.referenceTracking.blocking": "true",
+        "spark.cleaner.referenceTracking.blocking.shuffle": "true",
+        "spark.cleaner.referenceTracking.cleanCheckpoints": "true",
+        "spark.executor.heartbeatInterval": "10s",          # Ultra frequent heartbeats
+        
+        # Force smaller feature vectors in broadcast
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "4MB",
+        
+        # Additional task binary size reduction
+        "spark.task.maxDirectResultSize": "256m",           # Reduced direct result size
+        "spark.driver.maxResultSize": "512m",               # Reduced driver result size
+        
+        # Disable all caching to reduce memory pressure
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.maxSize": "0",
+        
+        # Tree-specific optimizations
+        "spark.sql.adaptive.coalescePartitions.parallelismFirst": "true",
+        "spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold": "4MB",
+        
+        # Additional optimizations for tree models
+        "spark.sql.adaptive.skewJoin.skewedPartitionFactor": "1.5",  # Reduced from 2
+        "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes": "16MB",  # Reduced from 32MB
+        
+        # Force smaller broadcast sizes
+        "spark.sql.adaptive.broadcastJoinThreshold": "256k",
+        "spark.sql.autoBroadcastJoinThreshold": "256k",
+        
+        # Reduce memory usage during tree training
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "4MB",
+        "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
+    }
+
+def apply_tree_based_optimizations(spark_session):
+    """Apply tree-based specific optimizations to reduce large task binary warnings.
+    
+    This function applies ultra-aggressive optimizations for all tree-based models:
+    - Random Forest
+    - Decision Tree
+    - Gradient Boosting
+    - XGBoost
+    - LightGBM
+    
+    Args:
+        spark_session: The Spark session to optimize
+    """
+    
+    config = get_tree_based_optimizations()
+    print("🌳 Applying tree-based optimizations to reduce large task binary warnings...")
+    
+    applied_count = 0
+    failed_count = 0
+    
+    for key, value in config.items():
+        try:
+            spark_session.conf.set(key, value)
+            applied_count += 1
+        except Exception as e:
+            print(f"   ⚠️ Could not set {key}: {e}")
+            failed_count += 1
+    
+    print(f"   ✅ Applied {applied_count} tree-based optimizations")
+    if failed_count > 0:
+        print(f"   ⚠️ Failed to apply {failed_count} optimizations")
+    
+    # Additional cleanup for tree models
+    try:
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Clear any cached DataFrames if possible
+        if hasattr(spark_session, 'sparkContext'):
+            spark_session.sparkContext._jvm.System.gc()
+        
+        print(f"   🧹 Applied additional memory cleanup for tree models")
+    except Exception as e:
+        print(f"   ⚠️ Could not apply additional cleanup: {e}")
+
+def optimize_for_tree_based_tuning(spark_session, model_type="gradient_boosting", n_trials=None):
+    """Apply optimizations specifically for tree-based model hyperparameter tuning.
+    
+    This function applies ultra-aggressive optimizations to reduce broadcast warnings
+    during hyperparameter tuning of tree-based models.
+    
+    Args:
+        spark_session: The Spark session to optimize
+        model_type: Type of tree-based model being tuned
+        n_trials: Number of trials (used to adjust optimization intensity)
+    """
+    
+    print(f"🌳 Applying ultra-aggressive optimizations for {model_type} hyperparameter tuning...")
+    
+    # Apply tree-based optimizations
+    apply_tree_based_optimizations(spark_session)
+    
+    # Additional tuning-specific optimizations
+    tuning_config = {
+        # Ultra-aggressive broadcast reduction for tuning
+        "spark.sql.autoBroadcastJoinThreshold": "128k",      # Even smaller for tuning
+        "spark.sql.adaptive.broadcastJoinThreshold": "128k", # Even smaller for tuning
+        "spark.broadcast.blockSize": "64k",                  # Even smaller broadcast blocks
+        
+        # Ultra-frequent cleanup during tuning
+        "spark.cleaner.periodicGC.interval": "0.5s",         # Ultra frequent GC
+        "spark.executor.heartbeatInterval": "5s",            # Ultra frequent heartbeats
+        
+        # Reduce memory pressure during many trials
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": "2MB",   # Ultra small partitions
+        "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
+        
+        # Enhanced serialization for tuning
+        "spark.kryoserializer.buffer": "1k",                # Ultra small initial buffer
+        "spark.kryoserializer.buffer.max": "16m",           # Ultra reduced max buffer
+        "spark.serializer.objectStreamReset": "5",          # Ultra frequent resets
+        
+        # Disable all features that increase task size
+        "spark.sql.adaptive.localShuffleReader.enabled": "false",
+        "spark.sql.adaptive.skewJoin.enabled": "false",
+        "spark.sql.adaptive.bucketing.enabled": "false",
+        "spark.sql.adaptive.columnar.cache.enabled": "false",
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",
+        
+        # Force smaller result sizes
+        "spark.task.maxDirectResultSize": "128m",           # Ultra reduced direct result size
+        "spark.driver.maxResultSize": "256m",               # Ultra reduced driver result size
+        
+        # Disable all caching
+        "spark.sql.adaptive.columnar.cache.maxSize": "0",
+    }
+    
+    applied_count = 0
+    failed_count = 0
+    
+    for key, value in tuning_config.items():
+        try:
+            spark_session.conf.set(key, value)
+            applied_count += 1
+        except Exception as e:
+            print(f"   ⚠️ Could not set {key}: {e}")
+            failed_count += 1
+    
+    print(f"   ✅ Applied {applied_count} tuning-specific optimizations")
+    if failed_count > 0:
+        print(f"   ⚠️ Failed to apply {failed_count} optimizations")
+    
+    # Force immediate cleanup
+    try:
+        import gc
+        gc.collect()
+        
+        if hasattr(spark_session, 'sparkContext'):
+            spark_session.sparkContext._jvm.System.gc()
+        
+        print(f"   🧹 Applied immediate cleanup for tuning")
+    except Exception as e:
+        print(f"   ⚠️ Could not apply immediate cleanup: {e}")
+
+def suppress_java_wrapper_warnings():
+    """Suppress JavaWrapper cleanup warnings that are harmless but noisy."""
+    import warnings
+    import sys
+    
+    # Suppress specific PySpark warnings
+    warnings.filterwarnings("ignore", message=".*JavaWrapper.*")
+    warnings.filterwarnings("ignore", message=".*InstanceBuilder.*")
+    warnings.filterwarnings("ignore", message=".*NativeCodeLoader.*")
+    
+    # Suppress specific error messages in stderr
+    class WarningSuppressor:
+        def __init__(self):
+            self.original_stderr = sys.stderr
+            self.suppressed_messages = [
+                "Exception ignored in: <function JavaWrapper.__del__",
+                "AttributeError: 'GaussianMixture' object has no attribute '_java_obj'",
+                "Failed to load implementation from:dev.ludovic.netlib",
+                "WARN NativeCodeLoader: Unable to load native-hadoop library"
+            ]
+        
+        def write(self, message):
+            # Check if the message contains any of the suppressed patterns
+            if not any(pattern in message for pattern in self.suppressed_messages):
+                self.original_stderr.write(message)
+        
+        def flush(self):
+            self.original_stderr.flush()
+    
+    # Only suppress if not in debug mode
+    if not os.getenv("AUTOML_DEBUG", "false").lower() in ("true", "1", "yes"):
+        sys.stderr = WarningSuppressor()
+
+def verify_bigquery_connector(spark_session):
+    """Verify that the BigQuery connector is properly loaded and working."""
+    try:
+        # Test if BigQuery connector is available
+        test_reader = spark_session.read.format("bigquery")
+        
+        # Try a simple test query
+        test_df = test_reader.option("query", "SELECT 1 as test_column").load()
+        test_count = test_df.count()
+        
+        if test_count == 1:
+            print("✅ BigQuery connector verified and working")
+            return True
+        else:
+            print(f"⚠️ BigQuery connector test returned unexpected result: {test_count} rows")
+            return False
+            
+    except Exception as e:
+        print(f"❌ BigQuery connector verification failed: {e}")
+        return False
+
+def create_robust_spark_session(app_name="AutoML Robust", include_synapseml=False, include_bigquery=True, max_retries=3):
+    """Create a robust Spark session with better RPC error handling.
+    
+    Args:
+        app_name: Name of the Spark application
+        include_synapseml: If True, includes SynapseML JARs
+        include_bigquery: If True, includes BigQuery connector
+        max_retries: Maximum number of retries for session creation
+    
+    Returns:
+        SparkSession: Configured Spark session
+    """
+    import time
+    from pyspark.sql import SparkSession
+    
+    # Suppress JavaWrapper warnings
+    suppress_java_wrapper_warnings()
+    
+    # Get optimized configuration
+    config = get_optimized_spark_config(include_synapseml, include_bigquery)
+    
+    for attempt in range(max_retries):
+        try:
+            # Stop any existing sessions first
+            try:
+                existing_spark = SparkSession.getActiveSession()
+                if existing_spark:
+                    print(f"🔄 Stopping existing Spark session (attempt {attempt + 1})...")
+                    existing_spark.stop()
+                    time.sleep(2)  # Allow proper shutdown
+            except Exception as e:
+                print(f"⚠️ Warning: Could not stop existing session: {e}")
+            
+            # Create new session with robust configuration
+            builder = SparkSession.builder.appName(app_name)
+            
+            # Apply all configurations
+            for key, value in config.items():
+                builder = builder.config(key, value)
+            
+            # Add BigQuery-specific configurations if needed
+            if include_bigquery:
+                builder = builder \
+                    .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+                    .config("spark.hadoop.fs.gs.auth.service.account.enable", "false") \
+                    .config("spark.hadoop.fs.gs.auth.impersonation.service.account.enable", "false")
+            
+            # Create the session
+            spark = builder.getOrCreate()
+            
+            # Test the session with a simple operation
+            test_df = spark.createDataFrame([(1, "test")], ["id", "value"])
+            test_df.count()  # This will trigger RPC communication
+            
+            # Verify BigQuery connector if needed
+            if include_bigquery:
+                if not verify_bigquery_connector(spark):
+                    print("⚠️ BigQuery connector verification failed, but continuing...")
+            
+            print(f"✅ Spark session created successfully (attempt {attempt + 1})")
+            return spark
+            
+        except Exception as e:
+            print(f"❌ Failed to create Spark session (attempt {attempt + 1}/{max_retries}): {e}")
+            
+            if "RpcEndpointNotFoundException" in str(e) or "Cannot find endpoint" in str(e):
+                print("🔧 Detected RPC endpoint issue - applying additional fixes...")
+                
+                # Additional RPC-specific configurations for next attempt
+                config.update({
+                    "spark.driver.bindAddress": "localhost",
+                    "spark.driver.host": "localhost",
+                    "spark.network.timeout": "1200s",  # Even longer timeout
+                    "spark.executor.heartbeatInterval": "30s",  # More frequent heartbeats
+                    "spark.rpc.askTimeout": "1200s",
+                    "spark.rpc.lookupTimeout": "1200s",
+                })
+            
+            if attempt < max_retries - 1:
+                print(f"⏳ Retrying in 5 seconds...")
+                time.sleep(5)
+            else:
+                print("🛑 All retry attempts failed")
+                raise
+    
+    raise RuntimeError(f"Failed to create Spark session after {max_retries} attempts")
 
 if __name__ == "__main__":
     print("�� Spark Optimization Configuration for AutoML")
