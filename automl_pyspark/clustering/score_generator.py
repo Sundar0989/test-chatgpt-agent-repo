@@ -156,11 +156,17 @@ class {class_name}:
         """Create PySpark session with optimized configuration for clustering scoring."""
         return SparkSession.builder \
             .appName("{display_name} Scorer") \
+            .master("local[*]") \
             .config("spark.driver.bindAddress", "127.0.0.1") \
+            .config("spark.driver.host", "127.0.0.1") \
             .config("spark.driver.memory", "4g") \
             .config("spark.executor.memory", "4g") \
-            .config("spark.sql.adaptive.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.enabled", "false") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "false") \
+            .config("spark.local.dir", "/tmp") \
+            .config("spark.sql.warehouse.dir", "/tmp/spark-warehouse") \
             .getOrCreate()
     
     def load_model(self, model_dir: str = "."):
