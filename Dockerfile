@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     default-jdk \
     ca-certificates \
+    ca-certificates-java \
     openssl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -31,8 +32,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Expose port for Cloud Run
 ENV PORT=8080
-# Set the path to service account key
-ENV GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/key.json
+# Set the path to service account key (will be overridden at runtime)
+ENV GOOGLE_APPLICATION_CREDENTIALS=/app/automl_pyspark/gcp-creds/service_account_key.json
 # Set the GCP project ID
 ENV GOOGLE_CLOUD_PROJECT=atus-prism-dev
 

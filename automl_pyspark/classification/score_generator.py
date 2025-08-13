@@ -282,20 +282,23 @@ class {class_name}:
         """Create PySpark session with optimized configuration for large datasets."""
         return SparkSession.builder \
             .appName("{display_name}_Scoring") \
+            .master("local[*]") \
             .config("spark.driver.bindAddress", "127.0.0.1") \
-            .config("spark.sql.adaptive.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-            .config("spark.sql.adaptive.skewJoin.enabled", "true") \
+            .config("spark.driver.host", "127.0.0.1") \
+            .config("spark.sql.adaptive.enabled", "false") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "false") \
             .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
             .config("spark.driver.memory", "4g") \
             .config("spark.driver.maxResultSize", "2g") \
             .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.minPartitionSize", "1MB") \
-            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128MB") \
             .config("spark.network.timeout", "800s") \
             .config("spark.rpc.askTimeout", "600s") \
             .config("spark.sql.broadcastTimeout", "36000") \
             .config("spark.rpc.message.maxSize", "512") \
+            .config("spark.local.dir", "/tmp") \
+            .config("spark.sql.warehouse.dir", "/tmp/spark-warehouse") \
             .getOrCreate()
     
     def load_model(self):
