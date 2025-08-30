@@ -414,3 +414,65 @@ class DataInputManager:
 
         # Read using the upload loader logic based on extension
         return self._load_from_upload(file_path)
+
+
+def build_bigquery_query(table_ref: str, options: dict = None, is_view: bool = False) -> str:
+    """
+    Build a BigQuery query with user configurations.
+    
+    Args:
+        table_ref: BigQuery table reference (project.dataset.table or dataset.table)
+        options: Dictionary containing query options like WHERE clauses, column selection, etc.
+        is_view: Whether the table reference is a view (optional, will be auto-detected if not provided)
+        
+    Returns:
+        str: Configured SQL query
+    """
+    if not options:
+        options = {}
+    
+    # Start building the query
+    select_clause = options.get('select_columns', '*')
+    if select_clause and select_clause.strip():
+        select_part = select_clause.strip()
+    else:
+        select_part = '*'
+    
+    # Build the FROM clause with sampling if specified
+    from_part = f"`{table_ref}`"
+    sampling_where = ""
+    
+    if options.get('sample_percent'):
+        sample_percent = options['sample_percent']
+        if is_view:
+            # For views, use RAND() function for sampling
+            sampling_where = f"AND RAND() < {sample_percent / 100.0}"
+        else:
+            # For tables, use TABLESAMPLE SYSTEM
+            from_part += f" TABLESAMPLE SYSTEM ({sample_percent} PERCENT)"
+    
+    # Build the WHERE clause if specified
+    where_part = ""
+    if options.get('where_clause') and options['where_clause'].strip():
+        where_part = f"WHERE {options['where_clause'].strip()}"
+        if sampling_where:
+            where_part += f" {sampling_where}"
+    elif sampling_where:
+        # If no WHERE clause but we have sampling, create one
+        where_part = f"WHERE {sampling_where.strip('AND ')}"
+    
+    # Build the LIMIT clause if specified
+    limit_part = ""
+    if options.get('row_limit'):
+        limit_part = f"LIMIT {options['row_limit']}"
+    
+    # Construct the final query
+    query_parts = [f"SELECT {select_part}", f"FROM {from_part}"]
+    
+    if where_part:
+        query_parts.append(where_part)
+    
+    if limit_part:
+        query_parts.append(limit_part)
+    
+    return " ".join(query_parts)

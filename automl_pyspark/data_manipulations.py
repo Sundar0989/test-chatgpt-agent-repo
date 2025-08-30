@@ -31,11 +31,18 @@ def missing_value_calculation(X, miss_per=0.75):
                 for c in X.columns
              ])
     missing_len = X.count()
-    final_missing = missing.toPandas().transpose()
-    final_missing.reset_index(inplace=True)
-    final_missing.rename(columns={0: 'missing_count'}, inplace=True)
-    final_missing['missing_percentage'] = final_missing['missing_count'] / missing_len
-    vars_selected = final_missing['index'][final_missing['missing_percentage'] <= miss_per].tolist()
+    
+    # Use collect() instead of toPandas() to avoid Arrow conversion issues
+    missing_row = missing.collect()[0]
+    missing_dict = missing_row.asDict()
+    
+    # Create a list of variables that meet the missing value threshold
+    vars_selected = []
+    for col_name, missing_count in missing_dict.items():
+        missing_percentage = missing_count / missing_len
+        if missing_percentage <= miss_per:
+            vars_selected.append(col_name)
+    
     return vars_selected
 
 

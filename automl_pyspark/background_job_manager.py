@@ -3,6 +3,11 @@ Background Job Manager for AutoML PySpark
 
 This module handles background job execution independently from the Streamlit UI,
 preventing UI freezing and enabling real-time log streaming.
+
+Supports three execution modes:
+1. Local background threads (default)
+2. External message queue (Pub/Sub or Cloud Tasks)
+3. Dataproc Serverless (Google Cloud managed Spark)
 """
 
 import os
@@ -21,12 +26,12 @@ class BackgroundJobManager:
     Manages background AutoML job execution.  By default jobs are
     executed in local background threads.  Optionally, jobs can be
     dispatched to an external message queue (e.g. Google Cloud Pub/Sub
-    or Cloud Tasks) to enable more scalable execution.  Set the
-    environment variable ``USE_GCP_QUEUE`` to ``true`` or pass
-    ``use_gcp_queue=True`` when constructing the manager to enable
-    queue-based dispatch.  When using a queue, the job configuration
-    JSON will be published and a separate worker (e.g. Cloud Run
-    service) should subscribe to process jobs.
+    or Cloud Tasks) or to Dataproc Serverless for managed Spark execution.
+    
+    Execution modes:
+    - Local: Set no environment variables (default)
+    - Queue: Set USE_GCP_QUEUE=true
+    - Dataproc: Set ENABLE_DATAPROC_SERVERLESS=true
     """
 
     def __init__(self, jobs_dir: str = "automl_jobs", use_gcp_queue: Union[bool, None] = None):
@@ -34,9 +39,35 @@ class BackgroundJobManager:
         self.running_jobs: Dict[str, subprocess.Popen] = {}
         self.job_logs: Dict[str, queue.Queue] = {}
         self.job_threads: Dict[str, threading.Thread] = {}
-        # Determine whether to use an external queue either from parameter or environment
+        
+        # Determine execution mode from environment variables
         env_flag = os.getenv("USE_GCP_QUEUE", "false").lower() in ("1", "true", "yes")
         self.use_gcp_queue = use_gcp_queue if use_gcp_queue is not None else env_flag
+        
+        # Check if Dataproc Serverless is enabled
+        self.use_dataproc_serverless = os.getenv("ENABLE_DATAPROC_SERVERLESS", "false").lower() in ("1", "true", "yes")
+        
+        # Initialize Dataproc Serverless manager if enabled
+        self.dataproc_manager = None
+        if self.use_dataproc_serverless:
+            try:
+                from dataproc_serverless_manager import DataprocServerlessManager
+                self.dataproc_manager = DataprocServerlessManager()
+                print("✅ Dataproc Serverless Manager initialized")
+            except ImportError as e:
+                print(f"⚠️ Dataproc Serverless Manager not available: {e}")
+                self.use_dataproc_serverless = False
+            except Exception as e:
+                print(f"❌ Failed to initialize Dataproc Serverless Manager: {e}")
+                self.use_dataproc_serverless = False
+        
+        # Log current execution mode
+        if self.use_dataproc_serverless:
+            print("🚀 Execution mode: Dataproc Serverless")
+        elif self.use_gcp_queue:
+            print("📤 Execution mode: External Queue (Pub/Sub/Cloud Tasks)")
+        else:
+            print("🏠 Execution mode: Local Background Threads")
     
     def _clean_config_for_json(self, config: Dict) -> Dict:
         """Clean configuration to remove non-JSON-serializable objects."""
@@ -108,6 +139,29 @@ class BackgroundJobManager:
                     self._log_job_message(job_id, f"📤 Job {job_id} published to message queue at {datetime.now().isoformat()}")
                 except Exception as e:
                     self._log_job_message(job_id, f"❌ Failed to publish job to queue: {e}")
+                    self._update_job_status(job_id, "Failed")
+                    return False
+            elif self.use_dataproc_serverless:
+                # When using Dataproc Serverless, submit the job to Dataproc
+                try:
+                    # Prepare data files for Dataproc submission
+                    data_files = self._extract_data_files_from_config(clean_config)
+                    
+                    # Submit to Dataproc Serverless
+                    batch_id = self.dataproc_manager.submit_spark_job(
+                        job_config=clean_config,
+                        job_id=job_id,
+                        data_files=data_files
+                    )
+                    
+                    self._update_job_status(job_id, "Submitted")
+                    self._log_job_message(job_id, f"🚀 Job {job_id} submitted to Dataproc Serverless (Batch ID: {batch_id}) at {datetime.now().isoformat()}")
+                    
+                    # Store batch ID for tracking
+                    self._store_dataproc_job_info(job_id, batch_id, clean_config)
+                    
+                except Exception as e:
+                    self._log_job_message(job_id, f"❌ Failed to submit job to Dataproc Serverless: {e}")
                     self._update_job_status(job_id, "Failed")
                     return False
             else:
@@ -250,21 +304,25 @@ def load_oot_datasets(config, data_manager=None, oot_bigquery_options=None):
         if oot_bigquery_options:
             # Use direct Spark-BigQuery connector for optimal performance
             try:
-                # Build query with options
+                # Always use table option for better compatibility
+                oot1_data = optimized_spark.read.format("bigquery").option("table", config['oot1_bigquery_table']).option("viewsEnabled", "true").load()
+                
+                # Apply custom options after loading if provided
                 if oot_bigquery_options:
-                    from data_input_manager import build_bigquery_query
-                    query = build_bigquery_query(config['oot1_bigquery_table'], oot_bigquery_options)
-                    # Load data using query
-                    oot1_data = optimized_spark.read.format("bigquery") \
-                        .option("query", query) \
-                        .option("viewsEnabled", "true") \
-                        .load()
-                else:
-                    # Load data directly from table
-                    oot1_data = optimized_spark.read.format("bigquery") \
-                        .option("table", config['oot1_bigquery_table']) \
-                        .option("viewsEnabled", "true") \
-                        .load()
+                    log_message('{job_id}', f"🔧 Applying custom options to OOT1 data...")
+                    
+                    # Apply WHERE clause if specified
+                    if oot_bigquery_options.get('where_clause'):
+                        where_clause = oot_bigquery_options['where_clause']
+                        oot1_data = oot1_data.filter(where_clause)
+                    
+                    # Apply column selection if specified
+                    if oot_bigquery_options.get('select_columns'):
+                        select_columns = oot_bigquery_options['select_columns']
+                        if select_columns and select_columns.strip() != '*':
+                            columns = [col.strip() for col in select_columns.split(',') if col.strip()]
+                            oot1_data = oot1_data.select(columns)
+                
                 log_message('{job_id}', f"✅ OOT1 BigQuery data loaded successfully using direct connector")
             except Exception as e:
                 log_message('{job_id}', f"⚠️ OOT1 BigQuery loading failed: {{str(e)}} - will skip OOT1")
@@ -284,21 +342,25 @@ def load_oot_datasets(config, data_manager=None, oot_bigquery_options=None):
             if oot_bigquery_options:
                 # Use direct Spark-BigQuery connector for optimal performance
                 try:
-                    # Build query with options
+                    # Always use table option for better compatibility
+                    oot1_data = optimized_spark.read.format("bigquery").option("table", oot1_config['data_source']).option("viewsEnabled", "true").load()
+                    
+                    # Apply custom options after loading if provided
                     if oot_bigquery_options:
-                        from data_input_manager import build_bigquery_query
-                        query = build_bigquery_query(oot1_config['data_source'], oot_bigquery_options)
-                        # Load data using query
-                        oot1_data = optimized_spark.read.format("bigquery") \
-                            .option("query", query) \
-                            .option("viewsEnabled", "true") \
-                            .load()
-                    else:
-                        # Load data directly from table
-                        oot1_data = optimized_spark.read.format("bigquery") \
-                            .option("table", oot1_config['data_source']) \
-                            .option("viewsEnabled", "true") \
-                            .load()
+                        log_message('{job_id}', f"🔧 Applying custom options to OOT1 data...")
+                        
+                        # Apply WHERE clause if specified
+                        if oot_bigquery_options.get('where_clause'):
+                            where_clause = oot_bigquery_options['where_clause']
+                            oot1_data = oot1_data.filter(where_clause)
+                        
+                        # Apply column selection if specified
+                        if oot_bigquery_options.get('select_columns'):
+                            select_columns = oot_bigquery_options['select_columns']
+                            if select_columns and select_columns.strip() != '*':
+                                columns = [col.strip() for col in select_columns.split(',') if col.strip()]
+                                oot1_data = oot1_data.select(columns)
+                    
                     log_message('{job_id}', f"✅ OOT1 BigQuery data loaded successfully using direct connector")
                 except Exception as e:
                     log_message('{job_id}', f"⚠️ OOT1 BigQuery loading failed: {{str(e)}} - will skip OOT1")
@@ -312,21 +374,24 @@ def load_oot_datasets(config, data_manager=None, oot_bigquery_options=None):
         if oot_bigquery_options:
             # Use direct Spark-BigQuery connector for optimal performance
             try:
-                # Build query with options
+                # Always use table option for better compatibility
+                oot2_data = optimized_spark.read.format("bigquery").option("table", config['oot2_bigquery_table']).option("viewsEnabled", "true").load()
+                
+                # Apply custom options after loading if provided
                 if oot_bigquery_options:
-                    from data_input_manager import build_bigquery_query
-                    query = build_bigquery_query(config['oot2_bigquery_table'], oot_bigquery_options)
-                    # Load data using query
-                    oot2_data = optimized_spark.read.format("bigquery") \
-                        .option("query", query) \
-                        .option("viewsEnabled", "true") \
-                        .load()
-                else:
-                    # Load data directly from table
-                    oot2_data = optimized_spark.read.format("bigquery") \
-                        .option("table", config['oot2_bigquery_table']) \
-                        .option("viewsEnabled", "true") \
-                        .load()
+                    log_message('{job_id}', f"🔧 Applying custom options to OOT2 data...")
+                    
+                    # Apply WHERE clause if specified
+                    if oot_bigquery_options.get('where_clause'):
+                        where_clause = oot_bigquery_options['where_clause']
+                        oot2_data = oot2_data.filter(where_clause)
+                    
+                    # Apply column selection if specified
+                    if oot_bigquery_options.get('select_columns'):
+                        select_columns = oot_bigquery_options['select_columns']
+                        if select_columns and select_columns.strip() != '*':
+                            columns = [col.strip() for col in select_columns.split(',') if col.strip()]
+                            oot2_data = oot2_data.select(columns)
                 log_message('{job_id}', f"✅ OOT2 BigQuery data loaded successfully using direct connector")
             except Exception as e:
                 log_message('{job_id}', f"⚠️ OOT2 BigQuery loading failed: {{str(e)}} - will skip OOT2")
@@ -346,21 +411,24 @@ def load_oot_datasets(config, data_manager=None, oot_bigquery_options=None):
             if oot_bigquery_options:
                 # Use direct Spark-BigQuery connector for optimal performance
                 try:
-                    # Build query with options
+                    # Always use table option for better compatibility
+                    oot2_data = optimized_spark.read.format("bigquery").option("table", oot2_config['data_source']).option("viewsEnabled", "true").load()
+                    
+                    # Apply custom options after loading if provided
                     if oot_bigquery_options:
-                        from data_input_manager import build_bigquery_query
-                        query = build_bigquery_query(oot2_config['data_source'], oot_bigquery_options)
-                        # Load data using query
-                        oot2_data = optimized_spark.read.format("bigquery") \
-                            .option("query", query) \
-                            .option("viewsEnabled", "true") \
-                            .load()
-                    else:
-                        # Load data directly from table
-                        oot2_data = optimized_spark.read.format("bigquery") \
-                            .option("table", oot2_config['data_source']) \
-                            .option("viewsEnabled", "true") \
-                            .load()
+                        log_message('{job_id}', f"🔧 Applying custom options to OOT2 data...")
+                        
+                        # Apply WHERE clause if specified
+                        if oot_bigquery_options.get('where_clause'):
+                            where_clause = oot_bigquery_options['where_clause']
+                            oot2_data = oot2_data.filter(where_clause)
+                        
+                        # Apply column selection if specified
+                        if oot_bigquery_options.get('select_columns'):
+                            select_columns = oot_bigquery_options['select_columns']
+                            if select_columns and select_columns.strip() != '*':
+                                columns = [col.strip() for col in select_columns.split(',') if col.strip()]
+                                oot2_data = oot2_data.select(columns)
                     log_message('{job_id}', f"✅ OOT2 BigQuery data loaded successfully using direct connector")
                 except Exception as e:
                     log_message('{job_id}', f"⚠️ OOT2 BigQuery loading failed: {{str(e)}} - will skip OOT2")
@@ -552,12 +620,10 @@ try:
         
         # Add BigQuery-specific configurations for BigQuery jobs
         if is_bigquery_job:
-            # Use direct Spark-BigQuery connector for optimal performance with large datasets
+            # Use bundled BigQuery connector JAR for optimal performance with large datasets
             # This approach loads data directly into Spark DataFrame without memory issues
-            log_message('{job_id}', "🔗 Using direct Spark-BigQuery connector for optimal performance")
-            log_message('{job_id}', "📦 Adding BigQuery connector Maven package for direct loading")
-            packages_list.append("com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1")
-            log_message('{job_id}', "✅ Added BigQuery connector Maven package")
+            log_message('{job_id}', "🔗 Using bundled BigQuery connector JAR for optimal performance")
+            log_message('{job_id}', "📦 No Maven packages needed - using bundled JARs")
         
         # Add SynapseML packages if LightGBM is being used
         run_lightgbm = config.get('model_params', {{}}).get('run_lightgbm', False)
@@ -572,6 +638,7 @@ try:
         
         spark_builder = SparkSession.builder \
             .appName(f"AutoML {{task_type_title}} Job") \
+            .master("local[*]") \
             .config("spark.driver.bindAddress", "127.0.0.1") \
             .config("spark.driver.host", "127.0.0.1") \
             .config("spark.driver.port", "0") \
@@ -581,14 +648,31 @@ try:
             .config("spark.dynamicAllocation.enabled", "false") \
             .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
             .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true") \
-            .config("spark.sql.adaptive.enabled", "true") \
-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.enabled", "false") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "false") \
             .config("spark.sql.shuffle.partitions", "200") \
             .config("spark.default.parallelism", "200") \
             .config("spark.network.timeout", "800s") \
             .config("spark.executor.heartbeatInterval", "60s") \
             .config("spark.rpc.askTimeout", "800s") \
-            .config("spark.rpc.lookupTimeout", "800s")
+            .config("spark.rpc.lookupTimeout", "800s") \
+            .config("spark.local.dir", "/tmp") \
+            .config("spark.sql.warehouse.dir", "/tmp/spark-warehouse") \
+            .config("spark.sql.catalogImplementation", "hive") \
+            .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+            .config("spark.hadoop.fs.gs.auth.service.account.enable", "false") \
+            .config("spark.hadoop.fs.gs.auth.impersonation.service.account.enable", "false") \
+            .config("spark.driver.allowMultipleContexts", "false") \
+            .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+            .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true") \
+            .config("spark.sql.execution.arrow.maxRecordsPerBatch", "10000") \
+            .config("spark.driver.maxResultSize", "2g") \
+            .config("spark.sql.adaptive.enabled", "false") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "false")
         
         # Add BigQuery-specific configurations if this is a BigQuery job
         if is_bigquery_job:
@@ -600,52 +684,84 @@ try:
                 .config("spark.driver.maxResultSize", "4g") \
                 .config("spark.hadoop.fs.gs.ssl.enabled", "false") \
                 .config("spark.hadoop.fs.gs.ssl.truststore", "/etc/ssl/certs/java/cacerts") \
-                .config("spark.hadoop.fs.gs.ssl.keystore.password", "changeit") \
-                .config("spark.sql.extensions", "org.apache.spark.sql.extensions.BigQueryConnectorExtension") \
-                .config("spark.sql.catalog.bigquery", "org.apache.spark.sql.catalog.BigQueryCatalog")
-            log_message('{job_id}', "✅ Added BigQuery-specific configurations with connector extensions")
+                .config("spark.hadoop.fs.gs.ssl.keystore.password", "changeit")
+            log_message('{job_id}', "✅ Added BigQuery-specific configurations")
         
-        # Add all packages at once (only if we have packages to add)
+        # Configure JAR files for BigQuery and SynapseML
+        JAR_DIR = "/app/automl_pyspark/libs"
+        BIGQUERY_JAR = f"{{JAR_DIR}}/spark-bigquery-with-dependencies_2.12-0.36.1.jar"
+        
+        # Build list of JARs to include
+        all_jars = [BIGQUERY_JAR]
+        
+        # Add SynapseML JARs if LightGBM is being used
+        if config.get('model_params', {{}}).get('run_lightgbm', False):
+            SYNAPSEML_JARS = [
+                f"{{JAR_DIR}}/synapseml_2.12-0.11.4.jar",
+                f"{{JAR_DIR}}/synapseml-core_2.12-0.11.4.jar",
+                f"{{JAR_DIR}}/synapseml-lightgbm_2.12-0.11.4.jar",
+                f"{{JAR_DIR}}/lightgbm-3.3.5.jar",
+                f"{{JAR_DIR}}/spray-json_2.12-1.3.5.jar",
+            ]
+            all_jars.extend(SYNAPSEML_JARS)
+            log_message('{job_id}', f"📦 Added SynapseML JARs for LightGBM support")
+        
+        # Configure Spark to use local JARs
+        if all_jars:
+            jar_paths = ",".join(all_jars)
+            spark_builder = spark_builder \
+                .config("spark.jars", jar_paths) \
+                .config("spark.driver.extraClassPath", jar_paths) \
+                .config("spark.executor.extraClassPath", jar_paths)
+            log_message('{job_id}', f"📦 Configured {{len(all_jars)}} local JARs: {{jar_paths}}")
+        
+        # Add Maven packages if any (for other dependencies)
         if packages_list:
             all_packages = ",".join(packages_list)
             spark_builder = spark_builder.config("spark.jars.packages", all_packages)
             log_message('{job_id}', f"📦 Configured {{len(packages_list)}} Maven packages: {{all_packages}}")
-        else:
-            # Use local JAR files for BigQuery connector (avoids SSL issues)
-            if is_bigquery_job:
-                local_jar_path = "/app/automl_pyspark/libs/spark-bigquery-with-dependencies_2.12-0.36.1.jar"
-                spark_builder = spark_builder.config("spark.jars", local_jar_path)
-                log_message('{job_id}', f"📦 Using local BigQuery JAR: {{local_jar_path}}")
-            else:
-                log_message('{job_id}', "📦 No Maven packages configured - using local JARs")
         
-        # Add repositories with SSL bypass for Maven downloads
-        if repositories_list:
-            all_repositories = ",".join(repositories_list)
-            spark_builder = spark_builder.config("spark.jars.repositories", all_repositories)
-            log_message('{job_id}', f"📦 Configured repositories: {{all_repositories}}")
-        else:
-            # Add default Maven repositories with HTTP fallback to bypass SSL issues
-            default_repos = "http://repo1.maven.org/maven2/,http://repos.spark-packages.org/"
-            spark_builder = spark_builder.config("spark.jars.repositories", default_repos)
-            log_message('{job_id}', f"📦 Using HTTP Maven repositories to bypass SSL issues: {{default_repos}}")
-        
-        # Add SSL bypass configurations for Maven downloads
+        # Add SSL configurations for BigQuery (using local JARs, no Maven downloads)
         if is_bigquery_job:
             spark_builder = spark_builder \
                 .config("spark.hadoop.fs.gs.ssl.enabled", "false") \
                 .config("spark.hadoop.fs.gs.ssl.truststore", "/etc/ssl/certs/java/cacerts") \
                 .config("spark.hadoop.fs.gs.ssl.keystore", "/etc/ssl/certs/java/cacerts") \
                 .config("spark.hadoop.fs.gs.ssl.keystore.password", "changeit")
-            log_message('{job_id}', "✅ Added SSL bypass configurations for Maven downloads")
+            log_message('{job_id}', "✅ Added SSL configurations for BigQuery (using local JARs)")
         
-        # Create the session
-        optimized_spark = spark_builder.getOrCreate()
-        
-        if is_bigquery_job:
-            log_message('{job_id}', "✅ BigQuery session created with proven test configuration")
-        else:
-            log_message('{job_id}', "✅ Spark session created with proven test configuration")
+        # Create the session with error handling and fallback
+        try:
+            log_message('{job_id}', "🔧 Attempting to create Spark session...")
+            optimized_spark = spark_builder.getOrCreate()
+            
+            if is_bigquery_job:
+                log_message('{job_id}', "✅ BigQuery session created with proven test configuration")
+            else:
+                log_message('{job_id}', "✅ Spark session created with proven test configuration")
+                
+        except Exception as e:
+            log_message('{job_id}', f"⚠️ Failed to create Spark session with full config: {{e}}")
+            log_message('{job_id}', "🔄 Attempting fallback configuration...")
+            
+            # Fallback to minimal configuration
+            fallback_builder = SparkSession.builder \
+                .appName(f"AutoML {{task_type_title}} Job") \
+                .master("local[1]") \
+                .config("spark.driver.bindAddress", "127.0.0.1") \
+                .config("spark.driver.host", "127.0.0.1") \
+                .config("spark.driver.memory", "4g") \
+                .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+                .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true") \
+                .config("spark.sql.adaptive.enabled", "false") \
+                .config("spark.local.dir", "/tmp")
+            
+            try:
+                optimized_spark = fallback_builder.getOrCreate()
+                log_message('{job_id}', "✅ Spark session created with fallback configuration")
+            except Exception as fallback_error:
+                log_message('{job_id}', f"❌ Failed to create Spark session even with fallback: {{fallback_error}}")
+                raise fallback_error
         
         # Wait for packages to be fully loaded and registered in JVM
         log_message('{job_id}', "⏳ Waiting for packages to be fully registered in JVM...")
@@ -689,11 +805,11 @@ try:
             else:
                 log_message('{job_id}', "🎉 LightGBM verification successful - proceeding with data processing")
         
-        # For BigQuery jobs, we'll use Google Cloud BigQuery Python client for data loading
-        # This avoids SSL issues and uses the same approach as the working Table/View Size Check
+        # For BigQuery jobs, we'll use direct Spark-BigQuery connector for optimal performance
+        # This loads data directly into Spark DataFrame without memory issues
         if is_bigquery_job:
-            log_message('{job_id}', "🔍 BigQuery data loading will use Google Cloud BigQuery Python client")
-            log_message('{job_id}', "✅ No connector verification needed - using native Python client")
+            log_message('{job_id}', "🔗 BigQuery data will be loaded using direct Spark-BigQuery connector")
+            log_message('{job_id}', "✅ Direct loading provides optimal performance for large datasets")
     
     except Exception as e:
         log_message('{job_id}', f"❌ Failed to create optimized Spark session: {{e}}")
@@ -741,26 +857,41 @@ try:
             table_ref = enhanced_data_config['data_source']
             bigquery_options = enhanced_data_config.get('options', {{}})
             
-            # Build query with user configurations if provided
+            # Always use table option for better compatibility and performance
+            # Custom options like WHERE clauses, column selection, etc. will be applied after loading
+            log_message('{job_id}', f"📥 Loading BigQuery data directly from table: {{table_ref}}")
+            train_data = optimized_spark.read.format("bigquery").option("table", table_ref).option("viewsEnabled", "true").load()
+            
+            # Apply custom options after loading if provided
             if bigquery_options:
-                # Import the query building function
-                from data_input_manager import build_bigquery_query
-                query = build_bigquery_query(table_ref, bigquery_options)
-                log_message('{job_id}', f"🔧 Using custom query: {{query}}")
+                log_message('{job_id}', f"🔧 Applying custom options after loading...")
                 
-                # Load data using query
-                log_message('{job_id}', "📥 Loading BigQuery data using custom query...")
-                train_data = optimized_spark.read.format("bigquery") \
-                    .option("query", query) \
-                    .option("viewsEnabled", "true") \
-                    .load()
-            else:
-                # Load data directly from table
-                log_message('{job_id}', f"📥 Loading BigQuery data directly from table: {{table_ref}}")
-                train_data = optimized_spark.read.format("bigquery") \
-                    .option("table", table_ref) \
-                    .option("viewsEnabled", "true") \
-                    .load()
+                # Apply WHERE clause if specified
+                if bigquery_options.get('where_clause'):
+                    where_clause = bigquery_options['where_clause']
+                    log_message('{job_id}', f"   🔍 Applying WHERE clause: {{where_clause}}")
+                    train_data = train_data.filter(where_clause)
+                
+                # Apply column selection if specified
+                if bigquery_options.get('select_columns'):
+                    select_columns = bigquery_options['select_columns']
+                    if select_columns and select_columns.strip() != '*':
+                        # Parse comma-separated columns
+                        columns = [col.strip() for col in select_columns.split(',') if col.strip()]
+                        log_message('{job_id}', f"   📝 Selecting columns: {{columns}}")
+                        train_data = train_data.select(columns)
+                
+                # Apply row limit if specified
+                if bigquery_options.get('row_limit'):
+                    row_limit = bigquery_options['row_limit']
+                    log_message('{job_id}', f"   📊 Limiting to {{row_limit}} rows")
+                    train_data = train_data.limit(row_limit)
+                
+                # Apply sampling if specified
+                if bigquery_options.get('sample_percent'):
+                    sample_percent = bigquery_options['sample_percent'] / 100.0
+                    log_message('{job_id}', f"   🎲 Applying {{sample_percent*100}}% sampling")
+                    train_data = train_data.sample(False, sample_percent)
             
             # Get metadata
             row_count = train_data.count()
@@ -1235,6 +1366,81 @@ except Exception as e:
                 del self.job_threads[job_id]
             if job_id in self.job_logs:
                 del self.job_logs[job_id]
+
+    def _extract_data_files_from_config(self, config: Dict) -> List[str]:
+        """Extract data file paths from job configuration."""
+        data_files = []
+        
+        # Check for data source configuration
+        if 'data_source' in config:
+            data_source = config['data_source']
+            if isinstance(data_source, str) and os.path.exists(data_source):
+                data_files.append(data_source)
+            elif isinstance(data_source, dict):
+                # Handle flexible data input configuration
+                if 'file_path' in data_source and os.path.exists(data_source['file_path']):
+                    data_files.append(data_source['file_path'])
+                elif 'uploaded_file' in data_source:
+                    # Handle uploaded file information
+                    pass  # Uploaded files are handled differently
+        
+        # Check for existing files configuration
+        if 'existing_files' in config:
+            existing_files = config['existing_files']
+            if isinstance(existing_files, list):
+                for file_path in existing_files:
+                    if os.path.exists(file_path):
+                        data_files.append(file_path)
+        
+        # Check for BigQuery configuration (no local files)
+        if 'bigquery' in config:
+            # BigQuery doesn't have local files to upload
+            pass
+        
+        return data_files
+    
+    def _store_dataproc_job_info(self, job_id: str, batch_id: str, config: Dict):
+        """Store Dataproc job information for tracking."""
+        try:
+            job_info = {
+                'job_id': job_id,
+                'batch_id': batch_id,
+                'submission_time': datetime.now().isoformat(),
+                'execution_mode': 'dataproc_serverless',
+                'config': config
+            }
+            
+            # Save to jobs directory
+            info_file = os.path.join(self.jobs_dir, f"{job_id}_dataproc_info.json")
+            with open(info_file, 'w') as f:
+                json.dump(job_info, f, indent=2)
+                
+            print(f"✅ Dataproc job info stored: {info_file}")
+            
+        except Exception as e:
+            print(f"⚠️ Could not store Dataproc job info: {e}")
+    
+    def get_dataproc_job_status(self, job_id: str) -> Optional[Dict]:
+        """Get status of a Dataproc Serverless job."""
+        if not self.use_dataproc_serverless or not self.dataproc_manager:
+            return None
+            
+        try:
+            # Try to find batch ID from stored info
+            info_file = os.path.join(self.jobs_dir, f"{job_id}_dataproc_info.json")
+            if os.path.exists(info_file):
+                with open(info_file, 'r') as f:
+                    job_info = json.load(f)
+                    batch_id = job_info.get('batch_id')
+                    
+                    if batch_id:
+                        return self.dataproc_manager.get_job_status(batch_id)
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ Could not get Dataproc job status: {e}")
+            return None
 
 # Global job manager instance
 job_manager = BackgroundJobManager() 

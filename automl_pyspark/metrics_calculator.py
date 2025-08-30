@@ -94,13 +94,16 @@ def calculate_metrics(predictions, y, data_type):
     ks_value = agg_df.select(F.max(ks_col)).first()[0]
 
     # Convert *only the aggregated table* to pandas for plotting and round numbers
-    decile_table = (agg_df
+    # Use collect() instead of toPandas() to avoid Arrow conversion issues
+    decile_table_spark = (agg_df
                     .withColumn('Pct_target', (agg_df.target/agg_df['count'])*100)
                     .withColumn('%Dist_Target', (agg_df.cum_target/total_target)*100)
                     .withColumn('%Dist_non_Target', (agg_df.cum_non_target/total_non_target)*100)
-                    .withColumn('spread', ks_col*100)
-                    .toPandas()
-                    .round(2))
+                    .withColumn('spread', ks_col*100))
+    
+    # Convert to pandas using collect() to avoid Arrow issues
+    decile_table_rows = decile_table_spark.collect()
+    decile_table = pd.DataFrame([row.asDict() for row in decile_table_rows]).round(2)
     
     print("KS_Value =", builtins.round(ks_value*100, 2))
     print("Metrics calculation process Completed in : " + " %s seconds" % (time.time() - start_time4))

@@ -1,0 +1,72 @@
+# Dataproc Serverless Configuration for AutoML PySpark
+# This configuration enables running Spark jobs on Google Cloud Dataproc Serverless
+
+# Google Cloud Project Settings
+gcp:
+  project_id: "${GCP_PROJECT_ID}"
+  region: "${GCP_REGION:-us-central1}"
+  
+# Dataproc Serverless Settings
+dataproc_serverless:
+  enabled: true
+  batch_id_prefix: "automl-spark"
+  spark_version: "3.4"
+  runtime_config_version: "1.0"
+  
+# Resource Configuration
+resources:
+  executor_count:
+    min: 2
+    max: 100
+  executor_memory: "16g"
+  executor_cpu: "4"
+  driver_memory: "16g"
+  driver_cpu: "4"
+  
+# Storage Configuration
+storage:
+  temp_bucket: "${GCP_TEMP_BUCKET}"
+  results_bucket: "${GCP_RESULTS_BUCKET}"
+  
+# Job Configuration
+job:
+  timeout_minutes: 60
+  idle_timeout_minutes: 10
+  
+# Cost Optimization
+cost_optimization:
+  enable_autoscaling: true
+  max_executor_count: 100
+  min_executor_count: 2
+  
+# AutoML Integration
+automl:
+  # Task types supported
+  supported_tasks:
+    - classification
+    - regression
+    - clustering
+  
+  # Models supported on Dataproc Serverless
+  supported_models:
+    classification:
+      - "Logistic Regression"
+      - "Random Forest"
+      - "XGBoost"
+      - "LightGBM"
+      - "Decision Tree"
+      - "Gradient Boosting"
+      - "Neural Network"
+    regression:
+      - "Linear Regression"
+      - "Random Forest"
+      - "XGBoost"
+      - "LightGBM"
+      - "Decision Tree"
+      - "Gradient Boosting"
+      - "Neural Network"
+    clustering:
+      - "K-Means"
+      - "Hierarchical"
+      - "DBSCAN"
+      - "Gaussian Mixture"

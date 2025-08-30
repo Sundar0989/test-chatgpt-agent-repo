@@ -6,7 +6,7 @@ docker rm rapid_modeler 2>/dev/null || true
 
 # Build the Docker image
 echo "🔨 Building Docker image..."
-docker build . -t rapid_modeler
+docker build --no-cache . -t rapid_modeler
 
 # Run the container with service account key and proper environment variables
 echo "🚀 Starting Rapid Modeler container..."

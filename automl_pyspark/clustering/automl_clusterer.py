@@ -10,6 +10,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List, Union
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.ml import PipelineModel
+import pandas as pd
 
 # Import spark optimization
 try:
@@ -1377,9 +1378,11 @@ class AutoMLClusterer:
         # Apply best model to get cluster assignments
         cluster_predictions = self.best_model.transform(train_df)
         
-        # Combine original data with cluster assignments
-        original_pandas = original_df.toPandas()
-        cluster_pandas = cluster_predictions.select("prediction").toPandas()
+        # Combine original data with cluster assignments using collect() to avoid Arrow issues
+        original_rows = original_df.collect()
+        original_pandas = pd.DataFrame([row.asDict() for row in original_rows])
+        cluster_rows = cluster_predictions.select("prediction").collect()
+        cluster_pandas = pd.DataFrame([row.asDict() for row in cluster_rows])
         
         # Create combined dataset
         combined_data = original_pandas.copy()

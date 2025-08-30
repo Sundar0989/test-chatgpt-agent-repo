@@ -119,8 +119,9 @@ class RegressionModelValidator:
         
         # Calculate only essential additional metrics
         try:
-            # Convert to Pandas for additional calculations
-            pred_pandas = predictions.select(target_column, "prediction").toPandas()
+            # Convert to Pandas for additional calculations using collect() to avoid Arrow issues
+            pred_rows = predictions.select(target_column, "prediction").collect()
+            pred_pandas = pd.DataFrame([row.asDict() for row in pred_rows])
             actual = pred_pandas[target_column].values
             predicted = pred_pandas["prediction"].values
             
@@ -151,8 +152,9 @@ class RegressionModelValidator:
         plot_files = []
         
         try:
-            # Convert to pandas for plotting
-            pred_pandas = predictions.select(target_column, "prediction").toPandas()
+            # Convert to pandas for plotting using collect() to avoid Arrow issues
+            pred_rows = predictions.select(target_column, "prediction").collect()
+            pred_pandas = pd.DataFrame([row.asDict() for row in pred_rows])
             actual = pred_pandas[target_column].values
             predicted = pred_pandas["prediction"].values
             

@@ -1538,15 +1538,45 @@ class AutoMLClassifier:
                     
                 print(f"Building {model_type} model with {cv_folds}-fold cross-validation...")
                 
-                # Use dual training approach for CV as well
-                model_result = self._build_model_with_dual_training_cv(
-                    cv_data, target_column, model_type, top_features, datasets, dataset_names, cv_folds
-                )
+                try:
+                    # Use dual training approach for CV as well
+                    model_result = self._build_model_with_dual_training_cv(
+                        cv_data, target_column, model_type, top_features, datasets, dataset_names, cv_folds
+                    )
+                except Exception as e:
+                    print(f"❌ Unexpected error during {model_type} model building: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Create a fallback result
+                    model_result = {
+                        'model': None,
+                        'metrics': {'error': str(e), 'model_type': model_type},
+                        'comparison': {'decision': 'failed', 'reasons': [f'Unexpected error: {str(e)}']}
+                    }
                 
                 # Store selected model and metrics
                 selected_model = model_result['model']
                 selected_metrics = model_result['metrics']
                 comparison_info = model_result['comparison']
+                
+                # Check if we have a valid model before proceeding
+                if selected_model is None:
+                    print(f"❌ {model_type} model training failed - no model to save")
+                    print(f"   Error details: {selected_metrics.get('error', 'Unknown error')}")
+                    
+                    # Suggest alternatives for failed models
+                    if model_type == 'xgboost':
+                        print(f"   💡 Consider using Random Forest or Gradient Boosting as alternatives")
+                        print(f"   💡 XGBoost may have compatibility issues with current Spark version")
+                    elif model_type == 'lightgbm':
+                        print(f"   💡 Consider using Random Forest or Gradient Boosting as alternatives")
+                        print(f"   💡 LightGBM may have compatibility issues with current Spark version")
+                    
+                    # Store error metrics but skip model saving
+                    self.model_metrics[model_type] = selected_metrics
+                    self.model_metrics[model_type]['selection_info'] = comparison_info
+                    continue
                 
                 # Store metrics with comparison information
                 self.model_metrics[model_type] = selected_metrics
@@ -1609,7 +1639,11 @@ class AutoMLClassifier:
                 cv_metrics = cv_model.avgMetrics[0]  # Best fold metrics
                 metrics[f'cv_score_{dataset_names[0]}'] = cv_metrics
                 
-                print(f"Cross-validation score for {model_type}: {cv_metrics:.4f}")
+                # Handle case where cv_metrics might be a string
+                if isinstance(cv_metrics, (int, float)):
+                    print(f"Cross-validation score for {model_type}: {cv_metrics:.4f}")
+                else:
+                    print(f"Cross-validation score for {model_type}: {cv_metrics}")
                 
                 # Store metrics
                 self.model_metrics[model_type] = metrics
@@ -1618,6 +1652,25 @@ class AutoMLClassifier:
                 model_path = os.path.join(self.output_dir, f'{model_type}_model')
                 self.model_builder.save_model(best_model, model_path)
 
+        # Print summary of model building results
+        successful_models = []
+        failed_models = []
+        
+        for model_type in ['logistic', 'random_forest', 'gradient_boosting', 'decision_tree', 'neural_network', 'xgboost', 'lightgbm']:
+            if self.config.get(f'run_{model_type}', True):
+                if model_type in self.model_metrics:
+                    if self.model_metrics[model_type].get('error'):
+                        failed_models.append(model_type)
+                    else:
+                        successful_models.append(model_type)
+        
+        print(f"\n📊 Model Building Summary:")
+        print(f"   ✅ Successfully built: {', '.join(successful_models) if successful_models else 'None'}")
+        print(f"   ❌ Failed to build: {', '.join(failed_models) if failed_models else 'None'}")
+        
+        if not successful_models:
+            print(f"   ⚠️ No models were successfully built. Please check the error messages above.")
+        
         return dataset_names
 
     def _optimize_hyperparameters(self, train_data: DataFrame, target_column: str, 
@@ -1765,7 +1818,11 @@ class AutoMLClassifier:
         decision = "default"
         
         if not is_better:
-            reasons.append(f"Tuned model performance ({tuned_score:.4f}) is not better than default ({default_score:.4f})")
+            # Handle case where scores might be strings
+            if isinstance(tuned_score, (int, float)) and isinstance(default_score, (int, float)):
+                reasons.append(f"Tuned model performance ({tuned_score:.4f}) is not better than default ({default_score:.4f})")
+            else:
+                reasons.append(f"Tuned model performance ({tuned_score}) is not better than default ({default_score})")
             decision = "default"
         elif improvement_pct < (improvement_threshold * 100):
             reasons.append(f"Performance improvement ({improvement_pct:.2f}%) is below threshold ({improvement_threshold*100}%)")
@@ -1974,10 +2031,17 @@ class AutoMLClassifier:
     def _log_model_comparison(self, model_type: str, comparison: Dict[str, Any]):
         """Log detailed model comparison results."""
         print(f"\n🤔 Model Selection Analysis for {model_type.upper()}:")
-        print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']:.4f}")
+        # Handle case where scores might be strings
+        if isinstance(comparison['default_score'], (int, float)):
+            print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']:.4f}")
+        else:
+            print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']}")
         
         if 'tuned_score' in comparison:
-            print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']:.4f}")
+            if isinstance(comparison['tuned_score'], (int, float)):
+                print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']:.4f}")
+            else:
+                print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']}")
             print(f"   📊 Performance improvement: {comparison['improvement_pct']:.2f}%")
             print(f"   🎪 Default overfitting gap: {comparison['default_overfitting']:.3f}")
             print(f"   🎪 Tuned overfitting gap: {comparison['tuned_overfitting']:.3f}")
@@ -2197,14 +2261,34 @@ class AutoMLClassifier:
     def _log_model_comparison_cv(self, model_type: str, comparison: Dict[str, Any]):
         """Log detailed model comparison results for cross-validation."""
         print(f"\n🤔 CV Model Selection Analysis for {model_type.upper()}:")
-        print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']:.4f}")
-        print(f"   📊 Default CV score: {comparison['default_cv_score']:.4f}")
+        # Handle case where scores might be strings
+        if isinstance(comparison['default_score'], (int, float)):
+            print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']:.4f}")
+        else:
+            print(f"   📈 Default model {comparison['primary_metric']}: {comparison['default_score']}")
+        
+        if isinstance(comparison['default_cv_score'], (int, float)):
+            print(f"   📊 Default CV score: {comparison['default_cv_score']:.4f}")
+        else:
+            print(f"   📊 Default CV score: {comparison['default_cv_score']}")
         
         if 'tuned_score' in comparison:
-            print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']:.4f}")
-            print(f"   🎯 Tuned CV score: {comparison['tuned_cv_score']:.4f}")
+            if isinstance(comparison['tuned_score'], (int, float)):
+                print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']:.4f}")
+            else:
+                print(f"   🎯 Tuned model {comparison['primary_metric']}: {comparison['tuned_score']}")
+            
+            if isinstance(comparison['tuned_cv_score'], (int, float)):
+                print(f"   🎯 Tuned CV score: {comparison['tuned_cv_score']:.4f}")
+            else:
+                print(f"   🎯 Tuned CV score: {comparison['tuned_cv_score']}")
+            
             print(f"   📊 Performance improvement: {comparison['improvement_pct']:.2f}%")
-            print(f"   📊 CV score improvement: {comparison['cv_improvement']:.4f}")
+            
+            if isinstance(comparison['cv_improvement'], (int, float)):
+                print(f"   📊 CV score improvement: {comparison['cv_improvement']:.4f}")
+            else:
+                print(f"   📊 CV score improvement: {comparison['cv_improvement']}")
             print(f"   🎪 Default overfitting gap: {comparison['default_overfitting']:.3f}")
             print(f"   🎪 Tuned overfitting gap: {comparison['tuned_overfitting']:.3f}")
         
@@ -2295,8 +2379,13 @@ class AutoMLClassifier:
             lines.append(f"   {icon} {model_type.upper()}: {decision} MODEL SELECTED")
             
             if decision_info['tuned_score'] != 'N/A':
-                lines.append(f"      📈 Default performance: {decision_info['default_score']:.4f}")
-                lines.append(f"      🎯 Tuned performance: {decision_info['tuned_score']:.4f}")
+                # Handle case where scores might be strings
+                if isinstance(decision_info['default_score'], (int, float)) and isinstance(decision_info['tuned_score'], (int, float)):
+                    lines.append(f"      📈 Default performance: {decision_info['default_score']:.4f}")
+                    lines.append(f"      🎯 Tuned performance: {decision_info['tuned_score']:.4f}")
+                else:
+                    lines.append(f"      📈 Default performance: {decision_info['default_score']}")
+                    lines.append(f"      🎯 Tuned performance: {decision_info['tuned_score']}")
                 lines.append(f"      📊 Improvement: {decision_info['improvement_pct']:.2f}%")
                 
                 overfitting = decision_info['overfitting_comparison']
@@ -2316,7 +2405,12 @@ class AutoMLClassifier:
                     lines.append(f"           - Model insensitive to parameter changes")
                     lines.append(f"         • Recommendation: Check optimization logs and parameter diversity")
             else:
-                lines.append(f"      📈 Default performance: {decision_info['default_score']:.4f}")
+                # Handle case where default_score might be a string
+                default_score = decision_info['default_score']
+                if isinstance(default_score, (int, float)):
+                    lines.append(f"      📈 Default performance: {default_score:.4f}")
+                else:
+                    lines.append(f"      📈 Default performance: {default_score}")
                 lines.append(f"      🎯 Tuned performance: N/A (no tuning performed)")
             
             lines.append(f"      💭 Key reasons:")

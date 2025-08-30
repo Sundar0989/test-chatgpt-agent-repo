@@ -99,7 +99,9 @@ def compute_shap_values(
 
     # Collect a small sample of the data to a pandas DataFrame
     try:
-        pd_data = sample_df.select(*feature_cols).limit(max_samples).toPandas()
+        # Use collect() instead of toPandas() to avoid Arrow conversion issues
+        sample_data = sample_df.select(*feature_cols).limit(max_samples).collect()
+        pd_data = pd.DataFrame([row.asDict() for row in sample_data])
     except Exception as e:
         print(f"⚠️ Could not collect sample for SHAP computation: {e}")
         return
@@ -125,8 +127,9 @@ def compute_shap_values(
         processed = pipeline_model.transform(sdf)
         # Generate predictions using the trained model
         preds = model.transform(processed)
-        # Convert predictions to pandas
-        preds_pd = preds.select("prediction").toPandas()
+        # Convert predictions to pandas using collect() to avoid Arrow issues
+        preds_rows = preds.select("prediction").collect()
+        preds_pd = pd.DataFrame([row.asDict() for row in preds_rows])
         # Return predictions as a NumPy array
         return preds_pd["prediction"].values
 

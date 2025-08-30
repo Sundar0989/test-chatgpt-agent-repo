@@ -216,8 +216,9 @@ class ClusteringModelValidator:
                 print(f"   ⚠️ Only {num_clusters} cluster(s) found - silhouette score requires at least 2 clusters")
                 metrics['silhouette_score'] = -1.0
             
-            # Convert to pandas for additional metrics
-            pred_pandas = predictions.select("features", "prediction").toPandas()
+            # Convert to pandas for additional metrics using collect() to avoid Arrow issues
+            pred_rows = predictions.select("features", "prediction").collect()
+            pred_pandas = pd.DataFrame([row.asDict() for row in pred_rows])
             
             if len(pred_pandas) > 0:
                 # Extract features (assuming VectorUDT can be converted)
@@ -329,9 +330,10 @@ class ClusteringModelValidator:
         os.makedirs(self.plots_dir, exist_ok=True)
         
         try:
-            # Convert to pandas and numpy for plotting
+            # Convert to pandas and numpy for plotting using collect() to avoid Arrow issues
             print(f"      📊 Converting predictions to pandas...")
-            pred_pandas = predictions.select("features", "prediction").toPandas()
+            pred_rows = predictions.select("features", "prediction").collect()
+            pred_pandas = pd.DataFrame([row.asDict() for row in pred_rows])
             print(f"      📊 Pandas data shape: {pred_pandas.shape}")
             
             if len(pred_pandas) == 0:
@@ -1198,9 +1200,10 @@ Max Cluster Density: {max(cluster_densities):.3f}'''
         print(f"      ✅ Plots directory confirmed: {os.path.exists(self.plots_dir)}")
         
         try:
-            # Convert to pandas for plotting
+            # Convert to pandas for plotting using collect() to avoid Arrow issues
             print(f"      📊 Converting predictions to pandas...")
-            pandas_data = predictions.select('features', 'prediction').toPandas()
+            pred_rows = predictions.select('features', 'prediction').collect()
+            pandas_data = pd.DataFrame([row.asDict() for row in pred_rows])
             print(f"      📊 Pandas data shape: {pandas_data.shape}")
             
             # Check if we have any data to plot

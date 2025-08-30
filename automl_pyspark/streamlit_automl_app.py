@@ -11,8 +11,8 @@ import pandas as pd
 import os
 import yaml
 import json
-import subprocess
-import threading
+
+
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +38,9 @@ try:
     FLEXIBLE_INPUT_AVAILABLE = True
 except ImportError:
     FLEXIBLE_INPUT_AVAILABLE = False
+
+# Environment setup functions removed - no longer needed since BigQuery connection test was removed
+# The app will use system default environment variables for any PySpark operations during job execution
 
 # Performance optimization: Add caching
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -865,11 +868,12 @@ def check_bigquery_table_size(table_ref: str, project_id: str = None, max_size_g
         
         # Check if GCP authentication is available
         try:
-            # Try to initialize the BigQuery client
-            client = bigquery.Client()
+            # Try to initialize the BigQuery client with explicit project ID
+            project_id_from_env = os.environ.get('GOOGLE_CLOUD_PROJECT', 'atus-prism-dev')
+            client = bigquery.Client(project=project_id_from_env)
         except Exception as auth_error:
             # If authentication fails, return a helpful error message
-            if "key.json was not found" in str(auth_error) or "credentials" in str(auth_error).lower():
+            if "key.json was not found" in str(auth_error) or "credentials" in str(auth_error).lower() or "file" in str(auth_error).lower():
                 return False, 0.0, "GCP authentication not configured. Please run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
             else:
                 return False, 0.0, f"GCP authentication error: {str(auth_error)}"
@@ -957,16 +961,12 @@ def check_bigquery_table_size(table_ref: str, project_id: str = None, max_size_g
                 # Use the actual configured query size instead of hardcoded estimates
                 size_gb = actual_size_gb
                 
-                # Log for debugging
-                print(f"Original query size: {bytes_processed / (1024**3):.2f} GB")
-                print(f"Configured query: {actual_query}")
-                print(f"Configured query size: {actual_size_gb:.2f} GB")
+                # Use configured query size for more accurate estimation
                 
             except Exception as e:
-                print(f"Error running configured query dry run: {e}")
                 # If configured query fails, keep the original estimate
-                print("Keeping original table size estimate")
                 # size_gb remains as the original estimate
+                pass
         
         # Check if size is within limits
         is_allowed = size_gb <= max_size_gb
@@ -995,8 +995,9 @@ def render_bigquery_section():
     try:
         from google.cloud import bigquery
         try:
-            # Test authentication
-            client = bigquery.Client()
+            # Test authentication with explicit project ID
+            project_id_from_env = os.environ.get('GOOGLE_CLOUD_PROJECT', 'atus-prism-dev')
+            client = bigquery.Client(project=project_id_from_env)
             st.success("✅ **BigQuery integration enabled with proven working configuration!**")
             st.info("💡 Connect directly to BigQuery tables without downloading data locally - supports datasets of any size")
         except Exception as auth_error:
@@ -1405,139 +1406,14 @@ WHERE your_filtering_conditions;
         
 
         
-        # BigQuery connection test with working configuration
-        # Only allow connection test if size check passed or size is reasonable
-        can_test_connection = size_check_passed or (size_gb <= 10)  # Allow test if size check passed or table is under 10GB
-        
-        if can_test_connection:
-            if st.checkbox("🔍 Test BigQuery Connection", help="Validate table access and preview schema with your configured options"):
-                if table_ref:
-                    with st.spinner("Testing BigQuery connection with your configured options..."):
-                        try:
-                            # Use the proven working BigQuery configuration
-                            from pyspark.sql import SparkSession
-                            
-                            # Create test session with proven working config
-                            test_spark = SparkSession.builder \
-                                .appName("Streamlit BigQuery Test") \
-                                .config("spark.driver.bindAddress", "127.0.0.1") \
-                                .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1") \
-                                .config("spark.driver.memory", "8g") \
-                                .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-                                .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true") \
-                                .config("spark.network.timeout", "600s") \
-                                .config("spark.executor.heartbeatInterval", "120s") \
-                                .getOrCreate()
-                            
-                            # Validate Spark session was created successfully
-                            if test_spark is None:
-                                raise RuntimeError("Failed to create Spark session")
-                            
-                            # Validate table_ref is not None or empty
-                            if not table_ref or table_ref.strip() == "":
-                                raise ValueError("Table reference is empty or None")
-                            
-                            # Validate project_id is properly set
-                            if not project_id or project_id.strip() == "":
-                                st.warning("⚠️ No project ID specified, using default project")
-                                project_id = "default-project"
-                            
-                            # For connection testing, we'll use the original table reference
-                            # but apply the configurations through Spark SQL after loading
-                            st.info(f"🔧 **Testing connection with table:** {table_ref}")
-                            
-                            # Test with direct table reference first
-                            test_df = test_spark.read.format("bigquery") \
-                                .option("parentProject", project_id or "default-project") \
-                                .option("viewsEnabled", "true") \
-                                .option("useAvroLogicalTypes", "true") \
-                                .option("table", table_ref) \
-                                .option("maxRowsPerPartition", 5) \
-                                .load()
-                            
-                            # Apply configurations if they exist
-                            if options and any([options.get('row_limit'), options.get('where_clause'), options.get('select_columns')]):
-                                st.info("🔧 **Applying your configurations to test data...**")
-                                
-                                try:
-                                    # Apply WHERE clause if specified
-                                    if options.get('where_clause'):
-                                        # Convert SQL WHERE clause to Spark filter expression
-                                        where_clause = options['where_clause']
-                                        # For now, we'll skip complex WHERE clauses in testing
-                                        # as they require SQL parsing which is complex
-                                        st.info(f"⚠️ **Note:** WHERE clause '{where_clause}' will be applied in the actual job, not in this test.")
-                                    
-                                    # Apply column selection if specified
-                                    if options.get('select_columns') and options['select_columns'].strip() != '*':
-                                        selected_columns = [col.strip() for col in options['select_columns'].split(',')]
-                                        # Check which columns actually exist in the dataframe
-                                        existing_columns = [col for col in selected_columns if col in test_df.columns]
-                                        if existing_columns:
-                                            test_df = test_df.select(*existing_columns)
-                                            st.info(f"✅ **Applied column selection:** {', '.join(existing_columns)}")
-                                        else:
-                                            st.warning(f"⚠️ **Column selection skipped:** None of the specified columns found in the table")
-                                    
-                                    # Apply row limit if specified
-                                    if options.get('row_limit'):
-                                        test_df = test_df.limit(options['row_limit'])
-                                        st.info(f"✅ **Applied row limit:** {options['row_limit']} rows")
-                                    
-                                    st.success("✅ **Configurations applied successfully!**")
-                                    
-                                except Exception as config_error:
-                                    st.warning(f"⚠️ **Configuration application warning:** {str(config_error)}")
-                                    st.info("💡 **Note:** The connection test will proceed with the original table data. Your configurations will be applied in the actual job.")
-                            
-                            # Get basic info
-                            sample_count = test_df.count()
-                            column_count = len(test_df.columns)
-                            columns = test_df.columns
-                            
-                            # Show success
-                            st.success(f"✅ BigQuery connection successful!")
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric("Sample Rows", sample_count)
-                            with col2:
-                                st.metric("Total Columns", column_count)
-                            
-                            st.write("**Available Columns:**")
-                            st.write(", ".join(columns[:10]) + ("..." if len(columns) > 10 else ""))
-                            
-                            if sample_count > 0:
-                                if sample_count > 100000:
-                                    st.info("📊 **Large dataset detected** - Sample data preview is disabled for datasets with more than 100K rows to improve performance.")
-                                else:
-                                    st.write("**Sample Data:**")
-                                    sample_pandas = test_df.limit(3).toPandas()
-                                    st.dataframe(sample_pandas)
-                        except Exception as e:
-                            st.error(f"❌ BigQuery connection test failed: {str(e)}")
-                        finally:
-                            # Ensure Spark session is stopped
-                            try:
-                                if 'test_spark' in locals() and test_spark is not None:
-                                    test_spark.stop()
-                            except:
-                                pass  # Ignore errors during cleanup
-                else:
-                    st.warning("⚠️ Please specify a BigQuery table reference first")
-        else:
-            st.info("ℹ️ **Connection Test Disabled:** Table size is too large for safe connection testing. Please reduce the data size or create a filtered table/view first.")
+        # BigQuery connection test removed to prevent issues
+        # Users can still configure their BigQuery tables and options
+        # The actual connection will be tested during job execution
         
 
         
-        # Show configuration summary
-        with st.expander("📋 Configuration Summary", expanded=False):
-            config_summary = {
-                'table_reference': table_ref,
-                'options': options,
-                'size_check_passed': size_check_passed
-            }
-            st.json(config_summary)
+        # Configuration summary is now shown in the main job submission page
+        # No need for duplicate summary here
         
         return {
             "source_type": "bigquery",
@@ -3394,7 +3270,7 @@ def create_job_submission_page():
                     # Reset the submission flag and prevent job submission
                     st.session_state.job_submission_in_progress = False
                     return
-                
+            
             elif enhanced_data_config and enhanced_data_config.get('source_type') == 'upload':
                 # Handle enhanced uploaded files
                 if uploaded_file is not None and data_file.startswith("uploaded_"):
@@ -7017,7 +6893,7 @@ def display_file_viewer(output_dir: str):
     """Display file viewer for all generated artifacts."""
     st.header("🔍 File Viewer")
     
-    # Show the output directory path for debugging
+    # Show the output directory path
     st.info(f"📁 Looking for files in: {output_dir}")
     
     # List all files in output directory (including subdirectories)
@@ -8266,6 +8142,34 @@ def display_single_model_regression_validation_plots(model_dir: str):
         
     except Exception as e:
         st.error(f"Error displaying validation plots for {model_name}: {str(e)}")
+
+# Health check endpoint for Cloud Run monitoring
+def health_check():
+    """Simple health check endpoint for Cloud Run monitoring."""
+    import json
+    from datetime import datetime
+    
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "rapid-modeler",
+        "version": "1.0.0"
+    }
+    
+    # Check if critical components are available
+    try:
+        import pyspark
+        health_status["pyspark"] = "available"
+    except ImportError:
+        health_status["pyspark"] = "unavailable"
+    
+    try:
+        import streamlit
+        health_status["streamlit"] = "available"
+    except ImportError:
+        health_status["streamlit"] = "unavailable"
+    
+    return health_status
 
 def main():
     """Main application function."""

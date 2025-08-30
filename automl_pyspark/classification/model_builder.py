@@ -20,16 +20,29 @@ import joblib
 # Advanced ML algorithms (optional imports with fallbacks)
 try:
     from xgboost.spark import SparkXGBClassifier
+    # Test if we can actually import and create a basic instance
     XGBOOST_AVAILABLE = True
-except ImportError:
-    print("⚠️ XGBoost not available. Install with: pip install xgboost>=1.6.0")
+    print("✅ XGBoost Spark integration available and functional")
+except ImportError as e:
+    print(f"⚠️ XGBoost import failed: {e}")
+    print("   Install with: pip install xgboost>=1.6.0")
+    XGBOOST_AVAILABLE = False
+except Exception as e:
+    print(f"⚠️ XGBoost initialization failed: {e}")
+    print("   XGBoost may be installed but not compatible with current Spark version")
     XGBOOST_AVAILABLE = False
 
 try:
     from synapse.ml.lightgbm import LightGBMClassifier
     LIGHTGBM_AVAILABLE = True
-except ImportError:
-    print("⚠️ LightGBM not available. Install with: pip install synapseml>=0.11.0")
+    print("✅ LightGBM (SynapseML) integration available and functional")
+except ImportError as e:
+    print(f"⚠️ LightGBM import failed: {e}")
+    print("   Install with: pip install synapseml>=0.11.0")
+    LIGHTGBM_AVAILABLE = False
+except Exception as e:
+    print(f"⚠️ LightGBM initialization failed: {e}")
+    print("   LightGBM may be installed but not compatible with current Spark version")
     LIGHTGBM_AVAILABLE = False
 
 def logistic_model(train, x, y):
@@ -92,18 +105,61 @@ def xgboost_model(train, x, y, num_classes=2):
     if not XGBOOST_AVAILABLE:
         raise ImportError("XGBoost not available. Install with: pip install xgboost>=1.6.0")
     
-    # Configure XGBoost parameters
-    # Note: SparkXGBClassifier automatically determines objective based on label data
-    xgb = SparkXGBClassifier(
-        features_col=x,
-        label_col=y,
-        max_depth=6,
-        n_estimators=100,
-        num_workers=1,
-        use_gpu=False
-    )
-    xgbModel = xgb.fit(train)
-    return xgbModel
+    try:
+        # Configure XGBoost parameters
+        # Note: SparkXGBClassifier automatically determines objective based on label data
+        xgb = SparkXGBClassifier(
+            features_col=x,
+            label_col=y,
+            max_depth=6,
+            n_estimators=100,
+            num_workers=1,
+            use_gpu=False
+        )
+        
+        # Validate the estimator
+        if hasattr(xgb, 'fit') and hasattr(xgb, 'getFeaturesCol') and hasattr(xgb, 'getLabelCol'):
+            print(f"✅ XGBoost estimator created successfully")
+            print(f"   Features column: {xgb.getFeaturesCol()}")
+            print(f"   Label column: {xgb.getLabelCol()}")
+        else:
+            print(f"⚠️ XGBoost estimator may be missing required methods")
+            print(f"   Available methods: {[m for m in dir(xgb) if not m.startswith('_')]}")
+            raise RuntimeError("XGBoost estimator validation failed")
+        
+        print(f"🔧 XGBoost parameters: max_depth=6, n_estimators=100, num_workers=1")
+        print(f"📊 Training data shape: {train.count()} rows")
+        
+        # Validate data format before training
+        print(f"🔍 Validating data format for XGBoost training...")
+        sample_row = train.select(x, y).first()
+        if sample_row:
+            print(f"   📊 Sample features: {type(sample_row[0])}, shape: {getattr(sample_row[0], 'size', 'unknown')}")
+            print(f"   📊 Sample label: {type(sample_row[1])}, value: {sample_row[1]}")
+        
+        xgbModel = xgb.fit(train)
+        print(f"✅ XGBoost model trained successfully")
+        
+        # Validate the trained model
+        if hasattr(xgbModel, 'transform') and hasattr(xgbModel, 'write'):
+            print(f"✅ XGBoost model validation passed - has required methods")
+        else:
+            print(f"⚠️ XGBoost model may be missing required methods")
+            print(f"   Available methods: {[m for m in dir(xgbModel) if not m.startswith('_')]}")
+            
+            # Check if this is a compatibility issue
+            if not hasattr(xgbModel, 'write'):
+                print(f"   ❌ XGBoost model missing 'write' method - this will cause save failures")
+                print(f"   💡 This may be a version compatibility issue between XGBoost and PySpark")
+                raise RuntimeError("XGBoost model missing required 'write' method for saving")
+        
+        return xgbModel
+        
+    except Exception as e:
+        print(f"❌ XGBoost model training failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"XGBoost model training failed: {str(e)}")
 
 def lightgbm_model(train, x, y, num_classes=2):
     """Build LightGBM model using SynapseML integration."""
@@ -186,6 +242,7 @@ class ModelBuilder:
         
         # Add advanced models if available
         if XGBOOST_AVAILABLE:
+            print("✅ XGBoost integration verified - adding to available models")
             self.model_types['xgboost'] = {
                 'class': SparkXGBClassifier,
                 'model_class': None,  # XGBoost model class varies
@@ -193,6 +250,7 @@ class ModelBuilder:
             }
         
         if LIGHTGBM_AVAILABLE:
+            print("✅ LightGBM integration verified - adding to available models")
             self.model_types['lightgbm'] = {
                 'class': LightGBMClassifier,
                 'model_class': None,  # LightGBM model class varies
@@ -390,21 +448,56 @@ class ModelBuilder:
         elif model_type == 'xgboost':
             if not XGBOOST_AVAILABLE:
                 raise ImportError("XGBoost not available. Install with: pip install xgboost>=1.6.0")
-            from xgboost.spark import SparkXGBClassifier
-            xgb = SparkXGBClassifier(
-                features_col=features_col,
-                label_col=label_col,
-                max_depth=hyperparams.get('maxDepth', 6),
-                n_estimators=hyperparams.get('numRound', 100),
-                eta=hyperparams.get('eta', 0.3),
-                subsample=hyperparams.get('subsample', 1.0),
-                colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
-                min_child_weight=hyperparams.get('min_child_weight', 1),
-                gamma=hyperparams.get('gamma', 0.0),
-                num_workers=hyperparams.get('num_workers', 1),
-                use_gpu=hyperparams.get('use_gpu', False)
-            )
-            return xgb.fit(train_data)
+            try:
+                from xgboost.spark import SparkXGBClassifier
+                print(f"🔧 Building XGBoost model with hyperparameters: {hyperparams}")
+                
+                xgb = SparkXGBClassifier(
+                    features_col=features_col,
+                    label_col=label_col,
+                    max_depth=hyperparams.get('maxDepth', 6),
+                    n_estimators=hyperparams.get('numRound', 100),
+                    eta=hyperparams.get('eta', 0.3),
+                    subsample=hyperparams.get('subsample', 1.0),
+                    colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
+                    min_child_weight=hyperparams.get('min_child_weight', 1),
+                    gamma=hyperparams.get('gamma', 0.0),
+                    num_workers=hyperparams.get('num_workers', 1),
+                    use_gpu=hyperparams.get('use_gpu', False)
+                )
+                
+                print(f"✅ XGBoost classifier created, training with {train_data.count()} samples...")
+                
+                # Validate data format before training
+                print(f"🔍 Validating data format for XGBoost training...")
+                sample_row = train_data.select(features_col, label_col).first()
+                if sample_row:
+                    print(f"   📊 Sample features: {type(sample_row[0])}, shape: {getattr(sample_row[0], 'size', 'unknown')}")
+                    print(f"   📊 Sample label: {type(sample_row[1])}, value: {sample_row[1]}")
+                
+                xgbModel = xgb.fit(train_data)
+                print(f"✅ XGBoost model training completed successfully")
+                
+                # Validate the trained model
+                if hasattr(xgbModel, 'transform') and hasattr(xgbModel, 'write'):
+                    print(f"✅ XGBoost model validation passed - has required methods")
+                else:
+                    print(f"⚠️ XGBoost model may be missing required methods")
+                    print(f"   Available methods: {[m for m in dir(xgbModel) if not m.startswith('_')]}")
+                    
+                    # Check if this is a compatibility issue
+                    if not hasattr(xgbModel, 'write'):
+                        print(f"   ❌ XGBoost model missing 'write' method - this will cause save failures")
+                        print(f"   💡 This may be a version compatibility issue between XGBoost and PySpark")
+                        raise RuntimeError("XGBoost model missing required 'write' method for saving")
+                
+                return xgbModel
+                
+            except Exception as e:
+                print(f"❌ XGBoost model building failed: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"XGBoost model building failed: {str(e)}")
         elif model_type == 'lightgbm':
             if not LIGHTGBM_AVAILABLE:
                 raise ImportError("LightGBM not available. Install with: pip install synapseml>=0.11.0")
@@ -518,20 +611,36 @@ class ModelBuilder:
         elif model_type == 'xgboost':
             if not XGBOOST_AVAILABLE:
                 raise ImportError("XGBoost not available. Install with: pip install xgboost>=1.6.0")
-            from xgboost.spark import SparkXGBClassifier
-            estimator = SparkXGBClassifier(
-                features_col=features_col,
-                label_col=label_col,
-                max_depth=hyperparams.get('maxDepth', 6),
-                n_estimators=hyperparams.get('numRound', 100),
-                eta=hyperparams.get('eta', 0.3),
-                subsample=hyperparams.get('subsample', 1.0),
-                colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
-                min_child_weight=hyperparams.get('min_child_weight', 1),
-                gamma=hyperparams.get('gamma', 0.0),
-                num_workers=hyperparams.get('num_workers', 1),
-                use_gpu=hyperparams.get('use_gpu', False)
-            )
+            try:
+                from xgboost.spark import SparkXGBClassifier
+                estimator = SparkXGBClassifier(
+                    features_col=features_col,
+                    label_col=label_col,
+                    max_depth=hyperparams.get('maxDepth', 6),
+                    n_estimators=hyperparams.get('numRound', 100),
+                    eta=hyperparams.get('eta', 0.3),
+                    subsample=hyperparams.get('subsample', 1.0),
+                    colsample_bytree=hyperparams.get('colsample_bytree', 1.0),
+                    min_child_weight=hyperparams.get('min_child_weight', 1),
+                    gamma=hyperparams.get('gamma', 0.0),
+                    num_workers=hyperparams.get('num_workers', 1),
+                    use_gpu=hyperparams.get('use_gpu', False)
+                )
+                
+                # Validate the estimator
+                if hasattr(estimator, 'fit') and hasattr(estimator, 'getFeaturesCol') and hasattr(estimator, 'getLabelCol'):
+                    print(f"✅ XGBoost estimator created successfully with parameters: {hyperparams}")
+                    print(f"   Features column: {estimator.getFeaturesCol()}")
+                    print(f"   Label column: {estimator.getLabelCol()}")
+                else:
+                    print(f"⚠️ XGBoost estimator may be missing required methods")
+                    print(f"   Available methods: {[m for m in dir(estimator) if not m.startswith('_')]}")
+                    raise RuntimeError("XGBoost estimator validation failed")
+            except Exception as e:
+                print(f"❌ Failed to create XGBoost estimator: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"XGBoost estimator creation failed: {str(e)}")
         elif model_type == 'lightgbm':
             if not LIGHTGBM_AVAILABLE:
                 raise ImportError("LightGBM not available. Install with: pip install synapseml>=0.11.0")
@@ -565,6 +674,9 @@ class ModelBuilder:
             model: Trained model to save
             path: Path to save the model
         """
+        if model is None:
+            raise ValueError("Cannot save None model. Model training failed.")
+        
         os.makedirs(path, exist_ok=True)
         model.write().overwrite().save(path)
         print(f"Model saved to {path}")

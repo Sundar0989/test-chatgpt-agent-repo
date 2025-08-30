@@ -115,7 +115,7 @@ def _load_credentials_from_env() -> Optional[service_account.Credentials]:
     variable is not set or the google-cloud library is unavailable.
     """
     key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not key_path or not service_account:
+    if not key_path or not key_path.strip() or not service_account:
         return None
     try:
         return service_account.Credentials.from_service_account_file(key_path)
